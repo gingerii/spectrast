@@ -84,16 +84,21 @@ def presence_df():
     return gr.fingerprint_presence(_presence_section())
 
 
+# Focality is a Gini over a sorted local map, which amplifies rounding: on Linux its effect size differs
+# from these values (computed on macOS) by 4e-9 relative. The other columns agree to 1e-15.
+_PIN_RTOL = 1e-6
+
+
 def test_presence_table_is_unchanged(presence_df):
     df = presence_df
     for _, r in df.iterrows():
-        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN[r.axis], rel=1e-12), r.axis
+        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN[r.axis], rel=_PIN_RTOL), r.axis
     assert list(df.underpowered) == [False, False, False]
     assert list(df.present) == [True, True, False]
     df2 = gr.fingerprint_presence(_presence_section(), axes=("scale_peak_moran", "focality"),
                                   n_perm=2, seed=7)
     for _, r in df2.iterrows():
-        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN2[r.axis], rel=1e-12), r.axis
+        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN2[r.axis], rel=_PIN_RTOL), r.axis
 
 
 def test_presence_values_are_what_the_test_ranked(presence_df):
