@@ -98,6 +98,9 @@ def _reduce_curve(C, radii):
     and ``scale_supported = False`` -- NOT an extrapolated value. This is the difference between a
     reduction that reports its own failure and one that returns a plausible number regardless.
 
+    Radii where a curve is undefined (NaN) are skipped: the crossing is interpolated between the
+    last defined radius above the half-maximum and the first radius at or below it.
+
     Parameters
     ----------
     C : array, shape (n_radii, n_genes)
@@ -131,9 +134,15 @@ def _reduce_curve(C, radii):
         if below.size == 0 or below[0] == 0:
             continue                                       # never crosses inside the window
         j = below[0]
-        denom = y[j - 1] - y[j]
-        f = (y[j - 1] - lvl[i]) / denom if abs(denom) > 1e-12 else 0.0
-        scale[i] = 2.0 ** (lr[j - 1] + f * (lr[j] - lr[j - 1]))
+        # interpolate from the last DEFINED radius before the crossing: an undefined radius (a
+        # texture band with no Fourier mode) carries no value to interpolate from
+        above = np.flatnonzero(np.isfinite(y[:j]))
+        if above.size == 0:
+            continue                                       # no defined value above the level
+        k = above[-1]
+        denom = y[k] - y[j]
+        f = (y[k] - lvl[i]) / denom if abs(denom) > 1e-12 else 0.0
+        scale[i] = 2.0 ** (lr[k] + f * (lr[j] - lr[k]))
 
     com = 2.0 ** np.mean(lr)                               # the grid's own centre of mass
     with warnings.catch_warnings():
@@ -282,14 +291,15 @@ def _scalograms(Z, lat, r_bin, stats, bin_um, chunk=64):
     This is the "one reduction" half of the unification: the statistics are different questions, but
     they share the lattice and the FFT engine, so computing them separately re-rasterizes and
     re-transforms for no gain.
+
+    Texture is :func:`spectrast.spatial.texture_multiscale`: the mean power in the radial-frequency
+    band centred on wavelength ``2 r`` for each radius ``r`` in ``r_bin``, so it sits on the same
+    radius axis as the five disc statistics.
     """
     from . import spatial as spa
-    from .gr import _texture_bins, _texture_from_power
 
-    H, W = lat["HW"]
     G = Z.shape[1]
     out = {s: np.zeros((len(r_bin), G)) for s in stats}
-    tb = _texture_bins(H, W, bin_um) if "texture" in stats else None
 
     for s0 in range(0, G, chunk):
         cols = list(range(s0, min(s0 + chunk, G)))
@@ -306,15 +316,7 @@ def _scalograms(Z, lat, r_bin, stats, bin_um, chunk=64):
         if "focality" in stats:
             out["focality"][:, sl] = spa.focality_scalogram(grids, lat["mask"], r_bin)
         if "texture" in stats:
-            which, multf, ck, kc = tb
-            NB = ck.size
-            for j, c in enumerate(cols):
-                f = np.where(lat["mask"], grids[..., j] - grids[..., j][lat["mask"]].mean(), 0.0)
-                P = (np.abs(np.fft.rfft2(f)) ** 2).ravel() * multf
-                prof = np.bincount(which, weights=P, minlength=NB) / ck
-                # texture's natural axis is frequency; reverse so coarse->fine matches a RADIUS axis
-                out["texture"][:, c] = np.interp(
-                    np.arange(len(r_bin)), np.linspace(0, len(r_bin) - 1, NB), prof[::-1])
+            out["texture"][:, sl] = spa.texture_multiscale(grids, lat["mask"], r_bin)
     return out
 
 
@@ -330,7 +332,12 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     ----------
     adata : AnnData
     stats : tuple of str
-        Any of :data:`ORG_STATS`.
+        Any of :data:`ORG_STATS`. ``"texture"`` is the mean spectral power in the radial-frequency
+        band centred on wavelength ``2 r`` at each radius ``r``
+        (:func:`spectrast.spatial.texture_multiscale`), so it reads the same radius axis as the
+        other statistics. A radius whose band holds no Fourier mode of the lattice gives NaN; this
+        happens at long wavelengths, where a band is narrower than the lattice's frequency
+        resolution or longer than the section.
     genes, radii, bin_um, layer, basis
         As elsewhere in the package. ``radii`` are in COORDINATE UNITS (µm); they are converted to
         whole bins internally, which is the grid the statistics are actually computed on.
@@ -357,6 +364,7 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     -----
     Read the three flags before the two numbers. ``scale_supported`` is False where the
     half-maximum was never crossed inside the window, so the scale is NaN rather than extrapolated.
+    Radii where a curve is NaN are skipped when the crossing is located.
     ``grid_suspect`` marks a scale sitting within ±10% of the radius grid's own centre of mass.
     ``window_limited`` marks a curve that had not flattened by the widest radius measured, so its
     half-maximum is placed by where the sweep was cut rather than by the tissue -- the General G
