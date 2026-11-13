@@ -276,11 +276,22 @@ def _lattice(xy, bin_um):
     return dict(row=row, col=col, lin=lin, HW=(H, W), scat=scat, mask=mask, inv=inv)
 
 
+def _expression(X):
+    """The expression matrix as :func:`_stack` reads it: a sparse matrix stays sparse, as CSC so a
+    chunk of gene columns is a cheap slice; a dense one is used as is."""
+    import scipy.sparse as sps
+
+    return X.tocsc() if sps.issparse(X) else np.asarray(X)
+
+
 def _stack(lat, Z, cols):
     """Rasterize a chunk of genes onto the lattice: per-bin MEAN, with empty bins left at zero and
-    carried by ``mask`` rather than being treated as measured zeros."""
+    carried by ``mask`` rather than being treated as measured zeros. Only the chunk's columns of
+    ``Z`` are densified, so a sparse matrix is never dense as a whole."""
     H, W = lat["HW"]
-    g = np.asarray(lat["scat"] @ Z[:, cols]).reshape(H, W, len(cols))
+    blk = Z[:, cols]
+    blk = np.asarray(blk.toarray() if hasattr(blk, "toarray") else blk, float)
+    g = np.asarray(lat["scat"] @ blk).reshape(H, W, len(cols))
     g[lat["mask"]] /= lat["inv"]
     return g
 
@@ -346,8 +357,11 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
         warning above four million bins; ``layer=None`` reads ``adata.X``; ``basis`` defaults to
         ``"spatial"``. Radii that round to the same whole bin are measured once.
     chunk : int, optional
-        Number of genes rasterized and transformed together. Larger chunks use more memory, about
-        one lattice-sized array per gene in the chunk. Default ``64``.
+        Number of genes densified, rasterized and transformed together. A sparse expression matrix
+        stays sparse (a CSC copy is made if it is in another sparse format) and only one chunk of
+        genes is dense at a time: an ``(n_cells, chunk)`` block plus the lattice stack of
+        ``chunk`` genes and its transforms, so this working memory grows with ``chunk`` and the
+        whole matrix is never dense. Default ``64``.
     return_curves : bool
         Also return the curves the table was reduced from. The table is identical either way.
 
@@ -384,7 +398,7 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     if genes is not None:
         idx, _ = _gene_idx(adata, genes)            # (positions, names)
         X = X[:, idx]; names = names[idx]
-    Z = np.asarray(X.todense(), float) if hasattr(X, "todense") else np.asarray(X, float)
+    Z = _expression(X)                          # sparse stays sparse; densified per chunk
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)
@@ -598,7 +612,7 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
     names = np.asarray(adata.var_names)
     if genes is not None:
         idx, _ = _gene_idx(adata, genes); X = X[:, idx]; names = names[idx]
-    Z = np.asarray(X.todense(), float) if hasattr(X, "todense") else np.asarray(X, float)
+    Z = _expression(X)                          # sparse stays sparse; densified per chunk
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)

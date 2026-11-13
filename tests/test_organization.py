@@ -444,6 +444,51 @@ def test_texture_follows_the_radii_not_their_positions(textured):
     assert s1["smooth5"] < s1["smooth10"] < s1["smooth20"]
 
 
+# ------------------------------------------------------------------ sparse expression stays sparse
+
+def test_sparse_and_dense_expression_give_identical_results(section):
+    """A sparse matrix is densified one gene chunk at a time; the numbers are the dense input's."""
+    import scipy.sparse as sps
+    sp_ = section.copy()
+    sp_.X = sps.csr_matrix(section.X)
+    stats = ("moran", "geary", "texture")
+    td, cd = org.organization(section, stats=stats, chunk=7, return_curves=True)
+    ts, cs = org.organization(sp_, stats=stats, chunk=7, return_curves=True)
+    pd.testing.assert_frame_equal(td, ts, check_exact=True)
+    for s in stats:
+        np.testing.assert_array_equal(cd[s], cs[s], err_msg=s)
+    sub = ["struct1", "shuf2", "struct4"]
+    pd.testing.assert_frame_equal(org.organization(section, stats=("moran",), genes=sub),
+                                  org.organization(sp_, stats=("moran",), genes=sub),
+                                  check_exact=True)
+    pd.testing.assert_frame_equal(org.presence(section, stats=("moran",), n_perm=6, chunk=7),
+                                  org.presence(sp_, stats=("moran",), n_perm=6, chunk=7),
+                                  check_exact=True)
+
+
+def test_a_sparse_matrix_is_never_densified_whole():
+    """Peak memory stays far below the dense matrix: only one chunk of genes is dense at a time."""
+    import tracemalloc
+
+    import anndata as ad
+    import scipy.sparse as sps
+
+    n, G = 40_000, 1_000
+    rng = np.random.default_rng(3)
+    a = ad.AnnData(sps.random(n, G, density=0.01, format="csr", random_state=4, dtype=np.float64))
+    a.obsm["spatial"] = rng.uniform(0, 2000, size=(n, 2))
+    dense = n * G * 8                                            # 320 MB
+    for name, kw in (("organization", {}), ("presence", dict(n_perm=6))):
+        tracemalloc.start()
+        try:
+            getattr(org, name)(a, stats=("moran",), radii=[40.0, 80.0, 160.0], bin_um=20.0,
+                               chunk=16, **kw)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert peak < dense / 4, f"{name}: peak {peak / 1e6:.0f} MB against {dense / 1e6:.0f} MB dense"
+
+
 def test_organization_and_presence_accept_a_gene_subset(section):
     """genes= selects columns by name (it used to index X with the (positions, names) tuple)."""
     sub = ["struct1", "shuf2"]
