@@ -322,6 +322,18 @@ def test_curve_embedding_pca_matches_numpy_svd(data):
     np.testing.assert_allclose(np.sort(np.abs(got[:, 0])), np.sort(np.abs(E[:, 0])), rtol=1e-9)
 
 
+def test_curve_embedding_takes_array_colours(data):
+    """Values aligned to the source's genes, as an ndarray or a Series, colour the points; only a
+    string is compared with the named colourings."""
+    for src in (data["adata"], data["curves"]):
+        *_, idx = S._read_curves(src, None)
+        vals = np.arange(len(S._curve_source(src)[2]), dtype=float) + 1.0
+        for colour in (vals, pd.Series(vals)):
+            ax = pl.curve_embedding(src, gate=None, color=colour)
+            np.testing.assert_array_equal(np.asarray(ax.collections[-1].get_array()), vals[idx])
+            plt.close("all")
+
+
 def test_curve_embedding_family_and_errors(data, monkeypatch):
     a = data["adata"]
     fig, fam = pl.curve_families(a, k=3, gate=None, return_labels=True)
