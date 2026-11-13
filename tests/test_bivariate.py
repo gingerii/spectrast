@@ -537,3 +537,42 @@ def test_mcc_score_never_gives_a_floor_p_to_an_undefined_observed_curve():
     fin = np.isfinite(g)
     np.testing.assert_array_equal(out["pval"][fin], ((ge + 1.0) / 21.0)[fin])
     assert np.isfinite(out["T_max"][1]) and out["p_max"][1] < 1.0
+
+
+def _accepted_shifts(mask, n_shift, seed):
+    """Replay spatial_association's shift draws and count those it accepts (overlap above 10 bins)."""
+    H, W = mask.shape
+    rng = np.random.default_rng(seed)
+    n_ok = 0
+    for _ in range(n_shift):
+        dy, dx = int(rng.integers(1, H)), int(rng.integers(1, W))
+        n_ok += int((np.roll(np.roll(mask, dy, 0), dx, 1) & mask).sum() > 10)
+    return n_ok
+
+
+def test_spatial_association_p_counts_only_accepted_shifts():
+    """A rejected shift (overlap of 10 bins or fewer) is not a draw from the null, so it must not enter
+    the denominator. With y = x every accepted shift is less extreme than the observed correlation, so
+    p = 1 / (n_accepted + 1) exactly; counting the rejected shifts gave 1 / (n_shift + 1)."""
+    rng = np.random.default_rng(0)
+    mask = np.zeros((40, 40), bool); mask[2:20, 3:21] = True
+    x = rng.standard_normal((40, 40))
+    n_ok = _accepted_shifts(mask, 39, seed=0)
+    assert 20 <= n_ok < 39                         # some shifts rejected, enough kept for a test
+    r = spatial.spatial_association(x, x, mask, n_modes=4, n_shift=39, seed=0)
+    assert r["p_shift"] == 1.0 / (n_ok + 1)
+
+
+def test_spatial_association_p_is_nan_when_too_few_shifts_are_accepted():
+    """When fewer than half of the shifts are accepted, the shift null has too few draws to be a test:
+    p is NaN, with a warning, instead of a p whose denominator counted the rejected shifts."""
+    rng = np.random.default_rng(7)
+    y, x = rng.standard_normal((2, 40, 40))
+    island = np.zeros((40, 40), bool); island[10:13, 10:13] = True    # 9 bins: every shift rejected
+    small = np.zeros((40, 40), bool); small[2:16, 3:17] = True
+    n_ok = _accepted_shifts(small, 39, seed=4)
+    assert 0 < n_ok < 39 / 2
+    for mask, seed in ((island, 0), (small, 4)):
+        with pytest.warns(RuntimeWarning, match="spatial_association"):
+            r = spatial.spatial_association(y, x, mask, n_modes=2, n_shift=39, seed=seed)
+        assert np.isnan(r["p_shift"]) and np.isfinite(r["r_resid"])

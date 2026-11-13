@@ -3320,6 +3320,12 @@ def spatial_association(y: np.ndarray, x: np.ndarray, mask: np.ndarray, n_modes:
     its alignment with y. This is properly calibrated under spatial confounding, where an OLS
     t-test is anti-conservative (it counts every cell as independent though residuals stay
     autocorrelated). Returns dict(r_resid, p_shift, r_naive).
+
+    A shift counts only when the tissue overlaps its translate in more than 10 bins, and
+    ``p_shift = (1 + n_ge) / (n_ok + 1)``, where ``n_ok`` is the number of accepted shifts and
+    ``n_ge`` the number of those whose residual correlation is at least as large in absolute value
+    as ``r_resid``. When fewer than ``max(min(n_shift, 10), n_shift / 2)`` shifts are accepted (a
+    small or fragmented tissue), ``p_shift`` is NaN and a RuntimeWarning says how many were usable.
     """
     m = np.asarray(mask, bool); H, W = m.shape
     yv = np.asarray(y, float); xv = np.asarray(x, float)
@@ -3338,13 +3344,25 @@ def spatial_association(y: np.ndarray, x: np.ndarray, mask: np.ndarray, n_modes:
     obs = _corr(rxg, ryg, m)
     rng = np.random.default_rng(seed)
     ge = 1
+    n_ok = 0                               # accepted shifts: a rejected one is not a null draw
     for _ in range(n_shift):
         dy, dx = int(rng.integers(1, H)), int(rng.integers(1, W))
         shx = np.roll(np.roll(rxg, dy, 0), dx, 1)
         shm = np.roll(np.roll(m, dy, 0), dx, 1) & m
-        if shm.sum() > 10 and abs(_corr(shx, ryg, shm)) >= abs(obs):
-            ge += 1
-    return dict(r_resid=obs, p_shift=ge / (n_shift + 1),
+        if shm.sum() > 10:
+            n_ok += 1
+            if abs(_corr(shx, ryg, shm)) >= abs(obs):
+                ge += 1
+    # Too few accepted shifts is no test. The bar is the one mark_cross_correlation's shift null
+    # uses to say its usable draws ran short.
+    if n_ok < max(min(n_shift, 10), 0.5 * n_shift):
+        warnings.warn(f"spatial_association: only {n_ok}/{n_shift} toroidal shifts were usable (the "
+                      f"tissue overlaps its own translate in 10 bins or fewer); p_shift is NaN.",
+                      RuntimeWarning, stacklevel=2)
+        p_shift = np.nan
+    else:
+        p_shift = ge / (n_ok + 1)
+    return dict(r_resid=obs, p_shift=p_shift,
                 r_naive=_corr(xv, yv, m))
 
 
