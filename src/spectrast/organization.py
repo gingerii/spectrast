@@ -79,10 +79,14 @@ def _orient(C):
     Data-driven rather than a per-statistic table, because the direction is a property of the
     statistic AND the tissue: Geary rises where Moran falls by construction, but LOSH and texture do
     not have a direction fixed a priori. Returns ``(oriented, sign)`` with ``sign = -1`` where the
-    curve was rising.
+    curve was rising. The direction is read between the first and the last radius at which some curve
+    is defined, so a radius undefined for every curve (a texture band with no Fourier mode) cannot
+    decide it.
     """
     C = np.asarray(C, float)
-    lo = np.nanmedian(C[0]); hi = np.nanmedian(C[-1])
+    defined = np.flatnonzero(np.isfinite(C.reshape(len(C), -1)).any(1))
+    first, last = (defined[0], defined[-1]) if defined.size else (0, len(C) - 1)
+    lo = np.nanmedian(C[first]); hi = np.nanmedian(C[last])
     sign = 1.0 if lo >= hi else -1.0
     return sign * C, sign
 
@@ -604,7 +608,9 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
         One row per statistic, with columns:
 
         * ``statistic``;
-        * ``n_tested``: genes whose observed curve is finite at every radius;
+        * ``n_tested``: genes whose observed curve is finite at every radius where the statistic is
+          defined for some gene (a radius undefined for every gene, such as a texture band with no
+          Fourier mode of the lattice, is left out);
         * ``n_perm`` and ``chance_frac_outside``, which is ``2 / (n_perm + 1)``;
         * ``frac_outside``: the fraction of gene × radius values that lie strictly outside the
           range of their own null values (values with a zero or undefined null standard
@@ -679,7 +685,8 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
                 guard = np.nan
             fo = float(np.nanmean(outside))
             zz = float(np.nanmedian(np.abs(z)))
-        n_tested = int(np.isfinite(o).all(0).sum())
+        defined = np.isfinite(o).any(1)                  # radii where some gene has a value
+        n_tested = int(np.isfinite(o[defined]).all(0).sum())
         rows.append(dict(statistic=s, n_tested=n_tested, n_perm=n_perm,
                          chance_frac_outside=chance, frac_outside=fo, median_abs_z=zz,
                          separates_genes=bool(fo > SEPARATES_MULTIPLE * chance),

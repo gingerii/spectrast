@@ -532,3 +532,30 @@ def test_organization_and_presence_accept_a_gene_subset(section):
         full.set_index("gene").loc[sub].reset_index()[one.columns].reset_index(drop=True))
     p = org.presence(section, stats=("moran",), genes=sub, n_perm=8)
     assert p.n_tested.iloc[0] == 2
+
+
+def test_orientation_reads_the_first_and_last_defined_radii():
+    """A radius undefined for every curve (a texture band with no Fourier mode) must not decide the
+    direction: a decaying population stays decaying and keeps its scale."""
+    C, r = _curve(kind="decay")
+    gap = C.copy()
+    gap[-1] = np.nan                                   # the last band is empty for every gene
+    assert org._orient(gap)[1] == 1.0
+    assert org._orient(gap[::-1])[1] == -1.0           # a rising population is still recognised
+    # the undefined radius behaves as if it were not in the sweep
+    cut, without = org._reduce_curve(gap, r), org._reduce_curve(C[:-1], r[:-1])
+    assert np.isfinite(cut["scale_um"]).sum() > 0
+    np.testing.assert_allclose(cut["scale_um"], without["scale_um"], rtol=1e-12)
+
+
+def test_presence_counts_genes_over_the_radii_where_the_statistic_is_defined(section):
+    """On a section whose largest texture bands hold no Fourier mode, those radii are NaN for every
+    gene. They leave the count of tested genes instead of making it zero."""
+    _, curves = org.organization(section, stats=("texture",), return_curves=True)
+    C = np.asarray(curves["texture"])
+    empty = ~np.isfinite(C).any(1)
+    assert empty.any() and not empty.all()             # the scenario: some radii undefined for all
+    want = int(np.isfinite(C[~empty]).all(0).sum())
+    s = org.presence(section, stats=("texture",), n_perm=8, seed=0).iloc[0]
+    assert want > 0
+    assert s["n_tested"] == want
