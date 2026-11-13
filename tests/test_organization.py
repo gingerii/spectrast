@@ -489,6 +489,38 @@ def test_a_sparse_matrix_is_never_densified_whole():
         assert peak < dense / 4, f"{name}: peak {peak / 1e6:.0f} MB against {dense / 1e6:.0f} MB dense"
 
 
+# ------------------------------------------------------------------ fewer than two radii
+
+@pytest.mark.parametrize("radii", [[20.0], [10.0, 11.0, 12.0], 20.0])
+def test_one_distinct_radius_is_refused_before_anything_is_computed(section, typed, monkeypatch,
+                                                                    radii):
+    """A curve over one radius has no half-maximum to cross. Radii that round to one whole bin
+    (10, 11 and 12 µm at 5 µm bins) are one radius. Refused when the radii are resolved, before the
+    lattice is built, in every entry point that reduces curves or needs texture bands."""
+    def _fail(*a, **k):
+        raise AssertionError("the lattice was built before the radii were checked")
+    monkeypatch.setattr(org, "_lattice", _fail)
+    msg = "at least two distinct radii after rounding to whole bins of 5"
+    with pytest.raises(ValueError, match=msg):
+        org.organization(section, stats=("moran",), radii=radii, bin_um=5.0)
+    with pytest.raises(ValueError, match=msg):
+        org.celltype_scale(typed, "ctype", min_cells=100, radii=radii, bin_um=5.0)
+    with pytest.raises(ValueError, match=msg):
+        org.presence(section, stats=("moran", "texture"), radii=radii, bin_um=5.0, n_perm=6)
+
+
+def test_presence_without_texture_still_runs_at_one_radius(section):
+    """Presence compares each value with its own null and reduces no curve, so one radius is a
+    valid sweep for the disc statistics."""
+    p = org.presence(section, stats=("moran",), radii=[20.0], bin_um=5.0, n_perm=6)
+    assert p.attrs["radii_um"] == [20.0]
+
+
+def test_the_reduction_refuses_a_single_radius():
+    with pytest.raises(ValueError, match="at least two radii"):
+        org._reduce_curve(np.ones((1, 3)), [20.0])
+
+
 def test_organization_and_presence_accept_a_gene_subset(section):
     """genes= selects columns by name (it used to index X with the (positions, names) tuple)."""
     sub = ["struct1", "shuf2"]

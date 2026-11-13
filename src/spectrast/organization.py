@@ -116,6 +116,8 @@ def _reduce_curve(C, radii):
     radii = np.asarray(radii, float)
     if C.shape[0] != radii.size:
         raise ValueError(f"curve has {C.shape[0]} radii, radii has {radii.size}")
+    if radii.size < 2:
+        raise ValueError(f"a curve needs at least two radii to reduce, got {radii.size}")
     A, sign = _orient(C)
     lr = np.log2(radii)
     n_valid = np.isfinite(A).sum(0)
@@ -276,6 +278,23 @@ def _lattice(xy, bin_um):
     return dict(row=row, col=col, lin=lin, HW=(H, W), scat=scat, mask=mask, inv=inv)
 
 
+def _radius_bins(r_um, bin_um, need):
+    """Radii in coordinate units -> ``(r_bin, r_um)``: the whole bins they are measured at, a
+    repeated bin kept once, and those bins back in coordinate units. Raises ``ValueError`` when
+    fewer than ``need`` distinct bins remain."""
+    r_um = np.atleast_1d(np.asarray(r_um, float))
+    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
+    keep = np.concatenate([[True], np.diff(r_bin) > 0])[: r_bin.size]   # a repeated bin is one radius
+    r_bin = r_bin[keep]
+    if r_bin.size < need:
+        want = "at least two distinct radii" if need == 2 else "at least one radius"
+        raise ValueError(
+            f"need {want} after rounding to whole bins of {bin_um:g}; the radii "
+            f"{[float(v) for v in r_um]} round to {r_bin.size} distinct bin(s): "
+            f"{[int(v) for v in r_bin]}. Pass radii further apart or a smaller bin_um.")
+    return r_bin, r_bin * bin_um
+
+
 def _expression(X):
     """The expression matrix as :func:`_stack` reads it: a sparse matrix stays sparse, as CSC so a
     chunk of gene columns is a cheap slice; a dense one is used as is."""
@@ -355,7 +374,8 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
         ``genes=None`` uses every gene; ``radii=None`` uses 19 log-spaced radii from 2 to 40 × the
         median cell spacing; ``bin_um=None`` uses 0.5 × the median cell spacing, coarsened with a
         warning above four million bins; ``layer=None`` reads ``adata.X``; ``basis`` defaults to
-        ``"spatial"``. Radii that round to the same whole bin are measured once.
+        ``"spatial"``. Radii that round to the same whole bin are measured once, and at least
+        two distinct radii must remain (a curve needs two to be reduced), else ``ValueError``.
     chunk : int, optional
         Number of genes densified, rasterized and transformed together. A sparse expression matrix
         stays sparse (a CSC copy is made if it is in another sparse format) and only one chunk of
@@ -402,9 +422,7 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)
-    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
-    keep = np.concatenate([[True], np.diff(r_bin) > 0])        # a repeated bin is one radius, not two
-    r_bin, r_um = r_bin[keep], r_bin[keep] * bin_um
+    r_bin, r_um = _radius_bins(r_um, bin_um, need=2)           # a curve needs two radii to reduce
 
     lat = _lattice(xy, bin_um)
     cur = _scalograms(Z, lat, r_bin, stats, bin_um, chunk=chunk)
@@ -571,7 +589,9 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
         6, or ``separates_genes`` could never be True; a smaller value raises ``ValueError``, but
         only after the scrambles have been computed. Default ``12``.
     genes, radii, bin_um, layer, basis, chunk
-        As in :func:`organization`. ``radii`` and ``bin_um`` are in coordinate units.
+        As in :func:`organization`. ``radii`` and ``bin_um`` are in coordinate units. One distinct
+        radius after rounding to whole bins is enough, except with ``"texture"`` in ``stats``,
+        which needs two (each band is bounded by its neighbours); fewer raise ``ValueError``.
     seed : int, optional
         Seed for the scrambles. Default ``0``.
     min_n : int, optional
@@ -616,9 +636,9 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)
-    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
-    keep = np.concatenate([[True], np.diff(r_bin) > 0])
-    r_bin, r_um = r_bin[keep], r_bin[keep] * bin_um
+    # texture's bands are bounded by the neighbouring radii, so it needs two; the disc statistics
+    # are compared with their nulls radius by radius and need one
+    r_bin, r_um = _radius_bins(r_um, bin_um, need=2 if "texture" in stats else 1)
 
     lat = _lattice(xy, bin_um)
     obs = _scalograms(Z, lat, r_bin, stats, bin_um, chunk=chunk)
