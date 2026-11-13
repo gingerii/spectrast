@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spectrast"
+version = "0.16.1"   # keep in step with src/spectrast/__init__.py __version__, which is
+                    # what the code stamps into provenance and figure legends
+description = "FFT-native multiscale spatial statistics for single-cell spatial transcriptomics — fast, scalable, AnnData-native"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ian Gingerich" }]
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "psutil",   # live-RAM budgeting for the memory guard / auto gene-chunking (core, not optional)
+]
+
+[project.urls]
+Source = "https://github.com/gingerii/spectrast"
+Issues = "https://github.com/gingerii/spectrast/issues"
+
+[project.optional-dependencies]
+# Heavy/optional deps are lazy-imported inside functions so the base package
+# installs and imports in any environment.
+full = ["scanpy", "anndata", "matplotlib", "scikit-learn"]
+# Optional GPU FFT backends (spectrast._fft). torch is NEVER a hard dependency — the base package runs on
+# the threaded-scipy CPU path alone. The right wheel is hardware-specific (see README "Compute
+# backends"): `cpu` needs no torch; `cuda` needs the CUDA wheel matched to your toolkit; `mps` needs
+# an arm64 (Apple) torch build.
+cpu = []
+cuda = ["torch"]
+mps = ["torch"]
+# Documentation build (Sphinx + scverse-style theme; notebooks rendered by myst-nb).
+docs = ["sphinx>=7", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-design"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["_archive"]

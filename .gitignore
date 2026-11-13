@@ -1,0 +1,26 @@
+# Data and outputs — regenerable, not versioned
+/data/
+/results/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+.pytest_cache/
+*.so
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets
+.env
+
+# Sphinx docs build artifacts
+docs/_build/
+docs/generated/
