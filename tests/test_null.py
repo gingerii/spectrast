@@ -401,3 +401,28 @@ def test_permutation_test_leaves_undefined_draws_out_of_the_null():
     assert np.isnan(out["pval"][1]) and np.isnan(out["qval"][1])
     assert run("less")[0]["pval"][0] == dn
     assert run("two-sided")[0]["pval"][0] == min(1.0, 2.0 * min(up, dn))
+
+
+@pytest.mark.parametrize("method", ["analytic", "permutation"])
+def test_gr_moran_null_survives_an_absent_gene(method):
+    """A gene with no counts has a NaN z at every radius. The per-gene summary looked up the radius of a
+    NaN maximum and raised KeyError, after the whole null had been computed. That gene now gets NaN in
+    the summary, and every other gene's rows and summary are those of a run without it."""
+    import pandas as pd
+    from spectrast import gr
+    a = _toy_adata()
+    a.X[:, 4] = 0.0
+    kw = dict(method=method, n_perm=19, radii=[1, 2, 4])
+    df = gr.moran_null(a, **kw)
+    absent = df[df.gene == "g4"]
+    assert len(absent) == 3 and np.isnan(absent.z).all() and np.isnan(absent.p).all()
+    assert np.isnan(a.var.loc["g4", "spectrast_null_zmax"])
+    assert np.isnan(a.var.loc["g4", "spectrast_null_r_zmax_um"])
+    others = [g for g in a.var_names if g != "g4"]
+    b = _toy_adata()
+    ref = gr.moran_null(b, genes=others, **kw)
+    pd.testing.assert_frame_equal(df[df.gene != "g4"].reset_index(drop=True), ref,
+                                  check_exact=False, rtol=1e-10, atol=1e-12)
+    for col in ("spectrast_null_zmax", "spectrast_null_r_zmax_um"):
+        assert np.isfinite(a.var.loc[others, col]).all()
+        np.testing.assert_allclose(a.var.loc[others, col], b.var.loc[others, col], rtol=1e-10)
