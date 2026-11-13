@@ -448,3 +448,22 @@ def test_one_unit_list_without_the_other_is_refused(which):
     units = dict(units_A=["d0", "d0", "d1", "d1"]) if which == "A" else dict(units_B=["d0", "d0", "d1", "d1"])
     with pytest.raises(ValueError, match="units_A and units_B"):
         diff.differential(A, B, axis="moran", features=["g0"], n_perm=20, null="replicate", **units)
+
+
+def test_grid_p_is_not_the_floor_where_the_difference_is_undefined():
+    """A gene absent from one arm has no difference at any radius. The main table gates it out
+    (p = 1); the per-radius grid must not give it the smallest possible p instead."""
+    A, B = _toy_arms(seed=4)
+    for a in A:
+        a.X[:, 3] = 0.0                                           # g3 unexpressed in every A section
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df, grid = diff.differential(A, B, axis="moran", features=_GENES, null="replicate",
+                                     n_perm=19, seed=0, return_grid=True)
+    g3 = grid[grid.gene == "g3"]
+    assert g3.dI.isna().all()
+    assert (g3.p == 1.0).all(), g3.p.tolist()
+    assert (g3.fdr == 1.0).all()
+    assert float(df.set_index("gene").loc["g3", "p"]) == 1.0
+    rest = grid[grid.gene != "g3"]
+    assert np.isfinite(rest.p).all() and (rest.p >= 1 / 20).all()

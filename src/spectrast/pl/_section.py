@@ -1047,7 +1047,7 @@ def curve_embedding(adata, *, color="scale", method="pca", gate=0.8, genes=None,
         if (~ok).any():
             ax.scatter(E[~ok, 0], E[~ok, 1], s=8, c=_u.MUTED, linewidths=0, label="no value")
         norm = None
-        if color == "scale" and (cv[ok] > 0).all() and ok.any():
+        if isinstance(color, str) and color == "scale" and (cv[ok] > 0).all() and ok.any():
             norm = LogNorm(vmin=float(np.min(cv[ok])), vmax=float(np.max(cv[ok])))
         sc = ax.scatter(E[ok, 0], E[ok, 1], s=10, c=cv[ok], cmap=_u.SEQUENTIAL, norm=norm,
                         linewidths=0)

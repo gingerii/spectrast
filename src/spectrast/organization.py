@@ -79,10 +79,14 @@ def _orient(C):
     Data-driven rather than a per-statistic table, because the direction is a property of the
     statistic AND the tissue: Geary rises where Moran falls by construction, but LOSH and texture do
     not have a direction fixed a priori. Returns ``(oriented, sign)`` with ``sign = -1`` where the
-    curve was rising.
+    curve was rising. The direction is read between the first and the last radius at which some curve
+    is defined, so a radius undefined for every curve (a texture band with no Fourier mode) cannot
+    decide it.
     """
     C = np.asarray(C, float)
-    lo = np.nanmedian(C[0]); hi = np.nanmedian(C[-1])
+    defined = np.flatnonzero(np.isfinite(C.reshape(len(C), -1)).any(1))
+    first, last = (defined[0], defined[-1]) if defined.size else (0, len(C) - 1)
+    lo = np.nanmedian(C[first]); hi = np.nanmedian(C[last])
     sign = 1.0 if lo >= hi else -1.0
     return sign * C, sign
 
@@ -97,6 +101,9 @@ def _reduce_curve(C, radii):
     A gene whose curve never crosses its own half-maximum inside the window gets ``scale_um = nan``
     and ``scale_supported = False`` -- NOT an extrapolated value. This is the difference between a
     reduction that reports its own failure and one that returns a plausible number regardless.
+
+    Radii where a curve is undefined (NaN) are skipped: the crossing is interpolated between the
+    last defined radius above the half-maximum and the first radius at or below it.
 
     Parameters
     ----------
@@ -113,6 +120,8 @@ def _reduce_curve(C, radii):
     radii = np.asarray(radii, float)
     if C.shape[0] != radii.size:
         raise ValueError(f"curve has {C.shape[0]} radii, radii has {radii.size}")
+    if radii.size < 2:
+        raise ValueError(f"a curve needs at least two radii to reduce, got {radii.size}")
     A, sign = _orient(C)
     lr = np.log2(radii)
     n_valid = np.isfinite(A).sum(0)
@@ -131,9 +140,15 @@ def _reduce_curve(C, radii):
         if below.size == 0 or below[0] == 0:
             continue                                       # never crosses inside the window
         j = below[0]
-        denom = y[j - 1] - y[j]
-        f = (y[j - 1] - lvl[i]) / denom if abs(denom) > 1e-12 else 0.0
-        scale[i] = 2.0 ** (lr[j - 1] + f * (lr[j] - lr[j - 1]))
+        # interpolate from the last DEFINED radius before the crossing: an undefined radius (a
+        # texture band with no Fourier mode) carries no value to interpolate from
+        above = np.flatnonzero(np.isfinite(y[:j]))
+        if above.size == 0:
+            continue                                       # no defined value above the level
+        k = above[-1]
+        denom = y[k] - y[j]
+        f = (y[k] - lvl[i]) / denom if abs(denom) > 1e-12 else 0.0
+        scale[i] = 2.0 ** (lr[k] + f * (lr[j] - lr[k]))
 
     com = 2.0 ** np.mean(lr)                               # the grid's own centre of mass
     with warnings.catch_warnings():
@@ -267,11 +282,39 @@ def _lattice(xy, bin_um):
     return dict(row=row, col=col, lin=lin, HW=(H, W), scat=scat, mask=mask, inv=inv)
 
 
+def _radius_bins(r_um, bin_um, need):
+    """Radii in coordinate units -> ``(r_bin, r_um)``: the whole bins they are measured at, a
+    repeated bin kept once, and those bins back in coordinate units. Raises ``ValueError`` when
+    fewer than ``need`` distinct bins remain."""
+    r_um = np.atleast_1d(np.asarray(r_um, float))
+    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
+    keep = np.concatenate([[True], np.diff(r_bin) > 0])[: r_bin.size]   # a repeated bin is one radius
+    r_bin = r_bin[keep]
+    if r_bin.size < need:
+        want = "at least two distinct radii" if need == 2 else "at least one radius"
+        raise ValueError(
+            f"need {want} after rounding to whole bins of {bin_um:g}; the radii "
+            f"{[float(v) for v in r_um]} round to {r_bin.size} distinct bin(s): "
+            f"{[int(v) for v in r_bin]}. Pass radii further apart or a smaller bin_um.")
+    return r_bin, r_bin * bin_um
+
+
+def _expression(X):
+    """The expression matrix as :func:`_stack` reads it: a sparse matrix stays sparse, as CSC so a
+    chunk of gene columns is a cheap slice; a dense one is used as is."""
+    import scipy.sparse as sps
+
+    return X.tocsc() if sps.issparse(X) else np.asarray(X)
+
+
 def _stack(lat, Z, cols):
     """Rasterize a chunk of genes onto the lattice: per-bin MEAN, with empty bins left at zero and
-    carried by ``mask`` rather than being treated as measured zeros."""
+    carried by ``mask`` rather than being treated as measured zeros. Only the chunk's columns of
+    ``Z`` are densified, so a sparse matrix is never dense as a whole."""
     H, W = lat["HW"]
-    g = np.asarray(lat["scat"] @ Z[:, cols]).reshape(H, W, len(cols))
+    blk = Z[:, cols]
+    blk = np.asarray(blk.toarray() if hasattr(blk, "toarray") else blk, float)
+    g = np.asarray(lat["scat"] @ blk).reshape(H, W, len(cols))
     g[lat["mask"]] /= lat["inv"]
     return g
 
@@ -282,14 +325,15 @@ def _scalograms(Z, lat, r_bin, stats, bin_um, chunk=64):
     This is the "one reduction" half of the unification: the statistics are different questions, but
     they share the lattice and the FFT engine, so computing them separately re-rasterizes and
     re-transforms for no gain.
+
+    Texture is :func:`spectrast.spatial.texture_multiscale`: the mean power in the radial-frequency
+    band centred on wavelength ``2 r`` for each radius ``r`` in ``r_bin``, so it sits on the same
+    radius axis as the five disc statistics.
     """
     from . import spatial as spa
-    from .gr import _texture_bins, _texture_from_power
 
-    H, W = lat["HW"]
     G = Z.shape[1]
     out = {s: np.zeros((len(r_bin), G)) for s in stats}
-    tb = _texture_bins(H, W, bin_um) if "texture" in stats else None
 
     for s0 in range(0, G, chunk):
         cols = list(range(s0, min(s0 + chunk, G)))
@@ -306,15 +350,7 @@ def _scalograms(Z, lat, r_bin, stats, bin_um, chunk=64):
         if "focality" in stats:
             out["focality"][:, sl] = spa.focality_scalogram(grids, lat["mask"], r_bin)
         if "texture" in stats:
-            which, multf, ck, kc = tb
-            NB = ck.size
-            for j, c in enumerate(cols):
-                f = np.where(lat["mask"], grids[..., j] - grids[..., j][lat["mask"]].mean(), 0.0)
-                P = (np.abs(np.fft.rfft2(f)) ** 2).ravel() * multf
-                prof = np.bincount(which, weights=P, minlength=NB) / ck
-                # texture's natural axis is frequency; reverse so coarse->fine matches a RADIUS axis
-                out["texture"][:, c] = np.interp(
-                    np.arange(len(r_bin)), np.linspace(0, len(r_bin) - 1, NB), prof[::-1])
+            out["texture"][:, sl] = spa.texture_multiscale(grids, lat["mask"], r_bin)
     return out
 
 
@@ -330,17 +366,26 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     ----------
     adata : AnnData
     stats : tuple of str
-        Any of :data:`ORG_STATS`.
+        Any of :data:`ORG_STATS`. ``"texture"`` is the mean spectral power in the radial-frequency
+        band centred on wavelength ``2 r`` at each radius ``r``
+        (:func:`spectrast.spatial.texture_multiscale`), so it reads the same radius axis as the
+        other statistics. A radius whose band holds no Fourier mode of the lattice gives NaN; this
+        happens at long wavelengths, where a band is narrower than the lattice's frequency
+        resolution or longer than the section.
     genes, radii, bin_um, layer, basis
         As elsewhere in the package. ``radii`` are in COORDINATE UNITS (µm); they are converted to
         whole bins internally, which is the grid the statistics are actually computed on.
         ``genes=None`` uses every gene; ``radii=None`` uses 19 log-spaced radii from 2 to 40 × the
         median cell spacing; ``bin_um=None`` uses 0.5 × the median cell spacing, coarsened with a
         warning above four million bins; ``layer=None`` reads ``adata.X``; ``basis`` defaults to
-        ``"spatial"``. Radii that round to the same whole bin are measured once.
+        ``"spatial"``. Radii that round to the same whole bin are measured once, and at least
+        two distinct radii must remain (a curve needs two to be reduced), else ``ValueError``.
     chunk : int, optional
-        Number of genes rasterized and transformed together. Larger chunks use more memory, about
-        one lattice-sized array per gene in the chunk. Default ``64``.
+        Number of genes densified, rasterized and transformed together. A sparse expression matrix
+        stays sparse (a CSC copy is made if it is in another sparse format) and only one chunk of
+        genes is dense at a time: an ``(n_cells, chunk)`` block plus the lattice stack of
+        ``chunk`` genes and its transforms, so this working memory grows with ``chunk`` and the
+        whole matrix is never dense. Default ``64``.
     return_curves : bool
         Also return the curves the table was reduced from. The table is identical either way.
 
@@ -357,6 +402,7 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     -----
     Read the three flags before the two numbers. ``scale_supported`` is False where the
     half-maximum was never crossed inside the window, so the scale is NaN rather than extrapolated.
+    Radii where a curve is NaN are skipped when the crossing is located.
     ``grid_suspect`` marks a scale sitting within ±10% of the radius grid's own centre of mass.
     ``window_limited`` marks a curve that had not flattened by the widest radius measured, so its
     half-maximum is placed by where the sweep was cut rather than by the tissue -- the General G
@@ -376,13 +422,11 @@ def organization(adata, *, stats=ORG_STATS, genes=None, radii=None, bin_um=None,
     if genes is not None:
         idx, _ = _gene_idx(adata, genes)            # (positions, names)
         X = X[:, idx]; names = names[idx]
-    Z = np.asarray(X.todense(), float) if hasattr(X, "todense") else np.asarray(X, float)
+    Z = _expression(X)                          # sparse stays sparse; densified per chunk
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)
-    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
-    keep = np.concatenate([[True], np.diff(r_bin) > 0])        # a repeated bin is one radius, not two
-    r_bin, r_um = r_bin[keep], r_bin[keep] * bin_um
+    r_bin, r_um = _radius_bins(r_um, bin_um, need=2)           # a curve needs two radii to reduce
 
     lat = _lattice(xy, bin_um)
     cur = _scalograms(Z, lat, r_bin, stats, bin_um, chunk=chunk)
@@ -549,7 +593,9 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
         6, or ``separates_genes`` could never be True; a smaller value raises ``ValueError``, but
         only after the scrambles have been computed. Default ``12``.
     genes, radii, bin_um, layer, basis, chunk
-        As in :func:`organization`. ``radii`` and ``bin_um`` are in coordinate units.
+        As in :func:`organization`. ``radii`` and ``bin_um`` are in coordinate units. One distinct
+        radius after rounding to whole bins is enough, except with ``"texture"`` in ``stats``,
+        which needs two (each band is bounded by its neighbours); fewer raise ``ValueError``.
     seed : int, optional
         Seed for the scrambles. Default ``0``.
     min_n : int, optional
@@ -562,7 +608,9 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
         One row per statistic, with columns:
 
         * ``statistic``;
-        * ``n_tested``: genes whose observed curve is finite at every radius;
+        * ``n_tested``: genes whose observed curve is finite at every radius where the statistic is
+          defined for some gene (a radius undefined for every gene, such as a texture band with no
+          Fourier mode of the lattice, is left out);
         * ``n_perm`` and ``chance_frac_outside``, which is ``2 / (n_perm + 1)``;
         * ``frac_outside``: the fraction of gene × radius values that lie strictly outside the
           range of their own null values (values with a zero or undefined null standard
@@ -590,13 +638,13 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
     names = np.asarray(adata.var_names)
     if genes is not None:
         idx, _ = _gene_idx(adata, genes); X = X[:, idx]; names = names[idx]
-    Z = np.asarray(X.todense(), float) if hasattr(X, "todense") else np.asarray(X, float)
+    Z = _expression(X)                          # sparse stays sparse; densified per chunk
 
     bin_um = float(bin_um) if bin_um is not None else float(_default_bin_um(xy))
     r_um = np.asarray(radii, float) if radii is not None else np.asarray(_radii_from_xy(xy), float)
-    r_bin = np.maximum(np.round(r_um / bin_um).astype(int), 1)
-    keep = np.concatenate([[True], np.diff(r_bin) > 0])
-    r_bin, r_um = r_bin[keep], r_bin[keep] * bin_um
+    # texture's bands are bounded by the neighbouring radii, so it needs two; the disc statistics
+    # are compared with their nulls radius by radius and need one
+    r_bin, r_um = _radius_bins(r_um, bin_um, need=2 if "texture" in stats else 1)
 
     lat = _lattice(xy, bin_um)
     obs = _scalograms(Z, lat, r_bin, stats, bin_um, chunk=chunk)
@@ -637,7 +685,8 @@ def presence(adata, *, stats=ORG_STATS, n_perm=12, genes=None, radii=None, bin_u
                 guard = np.nan
             fo = float(np.nanmean(outside))
             zz = float(np.nanmedian(np.abs(z)))
-        n_tested = int(np.isfinite(o).all(0).sum())
+        defined = np.isfinite(o).any(1)                  # radii where some gene has a value
+        n_tested = int(np.isfinite(o[defined]).all(0).sum())
         rows.append(dict(statistic=s, n_tested=n_tested, n_perm=n_perm,
                          chance_frac_outside=chance, frac_outside=fo, median_abs_z=zz,
                          separates_genes=bool(fo > SEPARATES_MULTIPLE * chance),

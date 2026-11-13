@@ -1835,7 +1835,9 @@ def moran_null(adata, *, genes=None, method="analytic", n_perm=199, strata_key=N
         ``r_um`` (radius in coordinate units), ``I`` (observed Moran's I), ``mu`` and ``sd`` (null
         mean and standard deviation), ``z``, and ``p``. ``p`` is one-sided (organization above the
         null): a normal tail probability for the analytic null, and
-        ``(1 + #{draws >= I}) / (n_perm + 1)`` for the permutation null.
+        ``(1 + #{draws >= I}) / (n + 1)`` over the ``n`` finite draws for the permutation null
+        (``n = n_perm`` unless a draw is undefined). Where ``I`` is undefined, e.g. at every radius
+        of a gene with no counts, ``z`` and ``p`` are NaN under either null.
 
         ``df.attrs`` holds ``spectrast_backend``, ``spectrast_null_method``, ``spectrast_null_kind``
         (``"A0"``, ``"N0"`` or ``"N1"``), ``n_perm``, ``seed``, ``bin_um``, ``radii_bins``,
@@ -1843,7 +1845,8 @@ def moran_null(adata, *, genes=None, method="analytic", n_perm=199, strata_key=N
         ``basis``; the same dict is written to ``adata.uns[key_added + "_params"]``. Per gene, the
         largest ``z`` over the sweep and the radius it sits at go to
         ``adata.var[key_added + "_zmax"]`` and ``adata.var[key_added + "_r_zmax_um"]`` (NaN for
-        genes not tested). With ``copy=True`` the return value is ``(adata_copy, df)``.
+        genes not tested, and for a gene whose ``z`` is NaN at every radius). With ``copy=True``
+        the return value is ``(adata_copy, df)``.
     """
     import warnings
     import pandas as pd
@@ -1944,7 +1947,11 @@ def moran_null(adata, *, genes=None, method="analytic", n_perm=199, strata_key=N
     })
     # per-gene summary to var: the largest z on the sweep and the radius it sits at
     g = df.groupby("gene")
-    zmax = g.z.max(); r_at = df.loc[g.z.idxmax(), ["gene", "r_um"]].set_index("gene").r_um
+    zmax = g.z.max()
+    # a gene whose z is NaN at every radius (e.g. no counts) has no radius of max z: leave it out
+    # here, so reindexing gives it NaN, rather than look up the NaN label idxmax returns for it
+    zd = df.dropna(subset=["z"])
+    r_at = zd.loc[zd.groupby("gene").z.idxmax(), ["gene", "r_um"]].set_index("gene").r_um
     adata.var[f"{key_added}_zmax"] = pd.Series(zmax).reindex(adata.var_names).to_numpy()
     adata.var[f"{key_added}_r_zmax_um"] = pd.Series(r_at).reindex(adata.var_names).to_numpy()
     adata.uns[f"{key_added}_params"] = {k: v for k, v in df.attrs.items()}

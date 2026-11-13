@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectrast"
-version = "0.16.1"   # keep in step with src/spectrast/__init__.py __version__, which is
+version = "0.17.0"   # keep in step with src/spectrast/__init__.py __version__, which is
                     # what the code stamps into provenance and figure legends
 description = "FFT-native multiscale spatial statistics for single-cell spatial transcriptomics — fast, scalable, AnnData-native"
 requires-python = ">=3.10"

@@ -62,6 +62,28 @@ def test_a_curve_peaking_mid_window_reports_no_scale_rather_than_a_wrong_one():
     assert np.isnan(R["scale_um"]).all()
 
 
+def test_an_undefined_radius_before_the_crossing_is_skipped_not_reported_as_the_scale():
+    """A texture band with no Fourier mode is NaN. When that radius sits just before the half-max
+    crossing, the crossing is interpolated from the last defined radius, never read off the NaN."""
+    from spectrast import scale as sc
+    r = np.geomspace(30.0, 600.0, 19)
+    C = np.exp(-r / 100.0)[:, None]
+    full = org._reduce_curve(C, r)["scale_um"][0]
+    j = int(np.flatnonzero(C[:, 0] <= C.min() + 0.5 * (C.max() - C.min()))[0])
+    gap = C.copy()
+    gap[j - 1] = np.nan
+    got = org._reduce_curve(gap, r)["scale_um"][0]
+    ok = np.isfinite(gap[:, 0])
+    want = sc.half_max(gap[ok], r[ok], sign=1.0)[0]
+    assert got != r[j - 1]
+    assert got == pytest.approx(want, rel=1e-12)
+    assert r[j - 2] < got < r[j] and got != full
+    # a curve peaking mid-window has no scale; an undefined first radius must not give it one
+    bump = np.repeat(np.exp(-((np.arange(19) - 9.0) ** 2) / 8.0)[:, None], 2, axis=1)
+    bump[0, 0] = np.nan
+    assert np.isnan(org._reduce_curve(bump, r)["scale_um"]).all()
+
+
 def test_reduction_rejects_a_radius_mismatch():
     C, r = _curve()
     with pytest.raises(ValueError, match="radii"):
@@ -251,17 +273,25 @@ def test_return_curves_leaves_the_table_bit_identical(section):
 def test_returned_curves_reduce_to_the_table_through_scale_half_max(section):
     """The curves are the ones the table was reduced from: the package's one half-max reduction,
     applied to them with the population orientation, gives the table's scale, and their oriented
-    peak gives its amplitude."""
+    peak gives its amplitude. ``half_max`` needs a curve defined at every radius, and the table
+    skips undefined radii (texture bands holding no Fourier mode), so each curve is reduced over the
+    radii where it is defined."""
     from spectrast import scale as sc
     stats = ("moran", "geary", "general_g", "losh", "focality", "texture")
     tab, cur = org.organization(section, stats=stats, return_curves=True)
+    r = cur["radii_um"]
     for s in stats:
         C = cur[s]
         sign = sc.orient_sign(C)
         t = tab[tab.statistic == s].set_index("gene").loc[cur["genes"]]
-        np.testing.assert_allclose(sc.half_max(C, cur["radii_um"], sign=sign), t.scale_um.to_numpy(),
-                                   rtol=1e-12, equal_nan=True, err_msg=s)
-        np.testing.assert_allclose((sign * C).max(0), t.amplitude.to_numpy(), rtol=1e-12, err_msg=s)
+        want = np.full(C.shape[1], np.nan)
+        for i in range(C.shape[1]):
+            ok = np.isfinite(C[:, i])
+            if ok.any():
+                want[i] = sc.half_max(C[ok, i:i + 1], r[ok], sign=sign)[0]
+        np.testing.assert_allclose(want, t.scale_um.to_numpy(), rtol=1e-12, equal_nan=True, err_msg=s)
+        np.testing.assert_allclose(np.nanmax(sign * C, axis=0), t.amplitude.to_numpy(), rtol=1e-12,
+                                   err_msg=s)
 
 
 def _typed_section(n_cells=6000, seed=1):
@@ -342,6 +372,155 @@ def test_celltype_scale_errors_name_the_problem(typed):
         org.celltype_scale(typed, "ctype", types=["patchy", "nope"])
 
 
+# ------------------------------------------------------------------ texture on the radius axis
+
+def _textured_section(n_cells=4000, extent=400.0, seed=0):
+    """A stripe of period 60 µm and three smoothed-noise fields (Gaussian smoothing of 5, 10 and
+    20 µm on a 1 µm grid, sampled at the cells), so each gene's texture has a known length."""
+    import anndata as ad
+    from scipy import ndimage
+
+    rng = np.random.default_rng(seed)
+    xy = rng.uniform(0, extent, size=(n_cells, 2))
+    cols = [2 + np.sin(2 * np.pi * xy[:, 0] / 60.0) + 0.3 * rng.normal(size=n_cells)]
+    names = ["stripe60"]
+    m = int(extent) + 1
+    ij = np.clip(xy.astype(int), 0, m - 1)
+    for s in (5, 10, 20):
+        f = ndimage.gaussian_filter(rng.normal(size=(m, m)), s, mode="wrap")
+        cols.append(f[ij[:, 1], ij[:, 0]]); names.append(f"smooth{s}")
+    a = ad.AnnData(np.column_stack(cols).astype(float))
+    a.var_names = names
+    a.obsm["spatial"] = xy
+    return a
+
+
+@pytest.fixture(scope="module")
+def textured():
+    return _textured_section()
+
+
+def test_texture_curve_is_spatial_texture_multiscale_at_the_measured_radii(textured):
+    """organization's texture curve is the band power of spatial.texture_multiscale on the same
+    lattice and the same radii in bins, so each value belongs to the radius it is plotted at."""
+    from spectrast import spatial as spa
+
+    b = 5.0
+    _, cur = org.organization(textured, stats=("texture",), radii=[10, 20, 40, 80, 160],
+                              bin_um=b, return_curves=True)
+    # the lattice, built independently: per-bin mean expression, empty bins zero and off the mask
+    xy = np.asarray(textured.obsm["spatial"], float)
+    X = np.asarray(textured.X, float)
+    xyz = xy - xy.min(0)
+    col = (xyz[:, 0] / b).astype(int)
+    row = (xyz[:, 1] / b).astype(int)
+    H, W = row.max() + 1, col.max() + 1
+    tot = np.zeros((H, W, X.shape[1]))
+    cnt = np.zeros((H, W))
+    np.add.at(tot, (row, col), X)
+    np.add.at(cnt, (row, col), 1.0)
+    mask = cnt > 0
+    grid = np.where(mask[..., None], tot / np.maximum(cnt, 1.0)[..., None], 0.0)
+    r_bin = np.round(cur["radii_um"] / b).astype(int)
+    want = spa.texture_multiscale(grid, mask, r_bin)
+    np.testing.assert_allclose(cur["texture"], want, rtol=1e-12, atol=0, equal_nan=True)
+
+
+def test_texture_follows_the_radii_not_their_positions(textured):
+    """Doubling every radius must not simply double the texture scale: the stripe's power stays in
+    the band of its 60 µm wavelength, and a smoothed field's scale is a length of the field."""
+    R = np.array([10.0, 20.0, 40.0, 80.0, 160.0])
+    runs = {k: org.organization(textured, stats=("texture",), radii=rr, bin_um=5.0,
+                                return_curves=True) for k, rr in (("R", R), ("2R", 2 * R))}
+    for k, (_, cur) in runs.items():
+        stripe = cur["texture"][:, list(cur["genes"]).index("stripe60")]
+        # wavelength 60 µm is radius 30 µm, inside the band centred on 40 µm in both sweeps
+        assert cur["radii_um"][np.nanargmax(stripe)] == 40.0, k
+    s1 = runs["R"][0].set_index("gene").scale_um
+    s2 = runs["2R"][0].set_index("gene").scale_um
+    for g in ("smooth10", "smooth20"):
+        assert np.isfinite(s1[g]) and np.isfinite(s2[g]), g
+        assert s2[g] / s1[g] < 1.5, (g, s1[g], s2[g])
+    assert s1["smooth5"] < s1["smooth10"] < s1["smooth20"]
+
+
+# ------------------------------------------------------------------ sparse expression stays sparse
+
+def test_sparse_and_dense_expression_give_identical_results(section):
+    """A sparse matrix is densified one gene chunk at a time; the numbers are the dense input's."""
+    import scipy.sparse as sps
+    sp_ = section.copy()
+    sp_.X = sps.csr_matrix(section.X)
+    stats = ("moran", "geary", "texture")
+    td, cd = org.organization(section, stats=stats, chunk=7, return_curves=True)
+    ts, cs = org.organization(sp_, stats=stats, chunk=7, return_curves=True)
+    pd.testing.assert_frame_equal(td, ts, check_exact=True)
+    for s in stats:
+        np.testing.assert_array_equal(cd[s], cs[s], err_msg=s)
+    sub = ["struct1", "shuf2", "struct4"]
+    pd.testing.assert_frame_equal(org.organization(section, stats=("moran",), genes=sub),
+                                  org.organization(sp_, stats=("moran",), genes=sub),
+                                  check_exact=True)
+    pd.testing.assert_frame_equal(org.presence(section, stats=("moran",), n_perm=6, chunk=7),
+                                  org.presence(sp_, stats=("moran",), n_perm=6, chunk=7),
+                                  check_exact=True)
+
+
+def test_a_sparse_matrix_is_never_densified_whole():
+    """Peak memory stays far below the dense matrix: only one chunk of genes is dense at a time."""
+    import tracemalloc
+
+    import anndata as ad
+    import scipy.sparse as sps
+
+    n, G = 40_000, 1_000
+    rng = np.random.default_rng(3)
+    a = ad.AnnData(sps.random(n, G, density=0.01, format="csr", random_state=4, dtype=np.float64))
+    a.obsm["spatial"] = rng.uniform(0, 2000, size=(n, 2))
+    dense = n * G * 8                                            # 320 MB
+    for name, kw in (("organization", {}), ("presence", dict(n_perm=6))):
+        tracemalloc.start()
+        try:
+            getattr(org, name)(a, stats=("moran",), radii=[40.0, 80.0, 160.0], bin_um=20.0,
+                               chunk=16, **kw)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert peak < dense / 4, f"{name}: peak {peak / 1e6:.0f} MB against {dense / 1e6:.0f} MB dense"
+
+
+# ------------------------------------------------------------------ fewer than two radii
+
+@pytest.mark.parametrize("radii", [[20.0], [10.0, 11.0, 12.0], 20.0])
+def test_one_distinct_radius_is_refused_before_anything_is_computed(section, typed, monkeypatch,
+                                                                    radii):
+    """A curve over one radius has no half-maximum to cross. Radii that round to one whole bin
+    (10, 11 and 12 µm at 5 µm bins) are one radius. Refused when the radii are resolved, before the
+    lattice is built, in every entry point that reduces curves or needs texture bands."""
+    def _fail(*a, **k):
+        raise AssertionError("the lattice was built before the radii were checked")
+    monkeypatch.setattr(org, "_lattice", _fail)
+    msg = "at least two distinct radii after rounding to whole bins of 5"
+    with pytest.raises(ValueError, match=msg):
+        org.organization(section, stats=("moran",), radii=radii, bin_um=5.0)
+    with pytest.raises(ValueError, match=msg):
+        org.celltype_scale(typed, "ctype", min_cells=100, radii=radii, bin_um=5.0)
+    with pytest.raises(ValueError, match=msg):
+        org.presence(section, stats=("moran", "texture"), radii=radii, bin_um=5.0, n_perm=6)
+
+
+def test_presence_without_texture_still_runs_at_one_radius(section):
+    """Presence compares each value with its own null and reduces no curve, so one radius is a
+    valid sweep for the disc statistics."""
+    p = org.presence(section, stats=("moran",), radii=[20.0], bin_um=5.0, n_perm=6)
+    assert p.attrs["radii_um"] == [20.0]
+
+
+def test_the_reduction_refuses_a_single_radius():
+    with pytest.raises(ValueError, match="at least two radii"):
+        org._reduce_curve(np.ones((1, 3)), [20.0])
+
+
 def test_organization_and_presence_accept_a_gene_subset(section):
     """genes= selects columns by name (it used to index X with the (positions, names) tuple)."""
     sub = ["struct1", "shuf2"]
@@ -353,3 +532,30 @@ def test_organization_and_presence_accept_a_gene_subset(section):
         full.set_index("gene").loc[sub].reset_index()[one.columns].reset_index(drop=True))
     p = org.presence(section, stats=("moran",), genes=sub, n_perm=8)
     assert p.n_tested.iloc[0] == 2
+
+
+def test_orientation_reads_the_first_and_last_defined_radii():
+    """A radius undefined for every curve (a texture band with no Fourier mode) must not decide the
+    direction: a decaying population stays decaying and keeps its scale."""
+    C, r = _curve(kind="decay")
+    gap = C.copy()
+    gap[-1] = np.nan                                   # the last band is empty for every gene
+    assert org._orient(gap)[1] == 1.0
+    assert org._orient(gap[::-1])[1] == -1.0           # a rising population is still recognised
+    # the undefined radius behaves as if it were not in the sweep
+    cut, without = org._reduce_curve(gap, r), org._reduce_curve(C[:-1], r[:-1])
+    assert np.isfinite(cut["scale_um"]).sum() > 0
+    np.testing.assert_allclose(cut["scale_um"], without["scale_um"], rtol=1e-12)
+
+
+def test_presence_counts_genes_over_the_radii_where_the_statistic_is_defined(section):
+    """On a section whose largest texture bands hold no Fourier mode, those radii are NaN for every
+    gene. They leave the count of tested genes instead of making it zero."""
+    _, curves = org.organization(section, stats=("texture",), return_curves=True)
+    C = np.asarray(curves["texture"])
+    empty = ~np.isfinite(C).any(1)
+    assert empty.any() and not empty.all()             # the scenario: some radii undefined for all
+    want = int(np.isfinite(C[~empty]).all(0).sum())
+    s = org.presence(section, stats=("texture",), n_perm=8, seed=0).iloc[0]
+    assert want > 0
+    assert s["n_tested"] == want
