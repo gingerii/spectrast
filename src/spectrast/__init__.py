@@ -11,4 +11,4 @@ from ._parallel import set_n_jobs, get_n_jobs            # permutation-null thre
 __all__ = ["spatial", "gr", "diff", "orient", "memory", "composition", "bivariate",
            "curveshape", "curvefit", "scale", "null", "io_visium", "pl",
            "set_backend", "get_backend", "set_workers", "set_n_jobs", "get_n_jobs"]
-__version__ = "0.16.1"
+__version__ = "0.17.0"
