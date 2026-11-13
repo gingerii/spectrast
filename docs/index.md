@@ -91,3 +91,5 @@ Every public function, by module.
 tutorials/index
 api/index
 ```
+
+This documentation was co-authored by Claude, an AI model made by Anthropic.
