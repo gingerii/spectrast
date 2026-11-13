@@ -21,6 +21,7 @@ dependencies = [
 [project.urls]
 Source = "https://github.com/gingerii/spectrast"
 Issues = "https://github.com/gingerii/spectrast/issues"
+Documentation = "https://spectrast.readthedocs.io"
 
 [project.optional-dependencies]
 # Heavy/optional deps are lazy-imported inside functions so the base package
@@ -41,4 +42,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = ["_archive"]

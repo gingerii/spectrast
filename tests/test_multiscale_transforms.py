@@ -15,6 +15,8 @@ from scipy.fft import next_fast_len
 from spectrast import _fft
 from spectrast import spatial as sp
 
+from _reference import assert_close_to_reference  # tests/_reference.py
+
 
 def bits(a):
     a = np.ascontiguousarray(a)
@@ -444,22 +446,29 @@ def test_no_cache_off_the_cpu_backend(monkeypatch):
     assert sp._ms_geom(np.ones((4, 4), bool), 8, 8, "disc") is None
 
 
-def test_frozen_fixture_bit_patterns_cold_and_warm():
-    """test_multiscale_equivalence compares with assert_array_equal, for which -0.0 == +0.0; this compares the
-    bit patterns (signed zeros, NaN positions) of every statistic on every fixture case, with an empty cache and
-    with every neighbour array served from it."""
+def test_frozen_fixture_cold_and_warm_cache():
+    """Every statistic on every fixture case: the run with every neighbour array served from the cache has the
+    same bit patterns (signed zeros, NaN positions) as the run with an empty cache, and the cold run matches the
+    frozen reference to floating-point rounding."""
     import os
     ref = os.path.join(os.path.dirname(__file__), "data", "multiscale_reference.npz")
     with np.load(ref) as z:
         d = {k: z[k] for k in z.files}
     names = sorted({k.split("/")[0] for k in d if "/" in k})
+    sp._ms_cache_clear()
+    cold = {}
     for warm in (False, True):
         for name in names:
             g, m = d[f"{name}/grid"], d[f"{name}/mask"]
             radii, kind = d[f"{name}/radii"].tolist(), str(d[f"{name}/kind"])
             got = sp.multiscale_statistics(g, m, radii, kind=kind)
             for s in sp.MULTISCALE_STATS:
-                assert_bits_equal(got[s], d[f"{name}/{s}"], f"{name}/{s} warm={warm}")
+                if warm:
+                    assert_bits_equal(got[s], cold[name][s], f"{name}/{s} warm vs cold")
+                else:
+                    assert_close_to_reference(got[s], d[f"{name}/{s}"], f"{name}/{s}")
+            if not warm:
+                cold[name] = got
 
 
 # ------------------------------------------------------------------ texture: threaded per-gene loop

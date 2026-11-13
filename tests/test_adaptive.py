@@ -504,11 +504,16 @@ def test_per_radius_kernel_selection():
 
 
 def test_memory_auto_chunk():
-    """The memory layer returns a positive budget and a chunk that shrinks as rows grow."""
+    """The memory layer returns a positive budget, and a chunk that shrinks as rows grow and drops below the
+    soft floor only when the budget cannot fit it. The budgets are fixed so that the result does not depend
+    on the machine's free memory."""
     from spectrast import memory
     assert memory.available_bytes() > 0
-    big, small = memory.gene_chunk(1_000_000), memory.gene_chunk(1000)
-    assert 64 <= big <= small <= 8192           # more rows -> smaller (or equal, if both clamped) chunk
+    budget = 4 * 1024 ** 3
+    big, small = memory.gene_chunk(1_000_000, budget=budget), memory.gene_chunk(1000, budget=budget)
+    assert 64 <= big <= small <= 128            # more rows -> smaller (or equal, if both clamped) chunk
+    tight = memory.gene_chunk(1_000_000, budget=10 ** 9)
+    assert 1 <= tight < 64                      # the floor gives way to the budget
     assert memory.densify_gb(np.zeros((1000, 1000))) > 0
 
 

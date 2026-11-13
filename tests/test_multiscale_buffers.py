@@ -4,8 +4,9 @@
 runs the inverse as pocketfft's two passes (the first in place, the second on the cropped rows only, in reused
 row blocks) through scipy's private pocketfft binding once `_pocketfft` has verified it, and gathers occupied
 bins with `np.take`. The fixture cases are small, so by default the product runs unthreaded; these tests force
-each path and hold it to the frozen reference outputs in tests/data/multiscale_reference.npz with exact
-equality. (tests/test_multiscale_transforms.py checks the split transforms themselves against scipy.)
+each path, hold it bit for bit to the default path in the same run, and hold both to the frozen reference
+outputs in tests/data/multiscale_reference.npz up to floating-point rounding (the reference was computed on
+one machine). (tests/test_multiscale_transforms.py checks the split transforms themselves against scipy.)
 """
 import os
 
@@ -14,6 +15,8 @@ import pytest
 
 from spectrast import _fft
 from spectrast import spatial as sp
+
+from _reference import assert_close_to_reference  # tests/_reference.py
 
 REF = os.path.join(os.path.dirname(__file__), "data", "multiscale_reference.npz")
 DISC = ("moran", "geary", "general_g", "losh", "focality")
@@ -43,26 +46,40 @@ def _case(d, name):
 @pytest.mark.parametrize("workers", [2, 3, 7])
 def test_threaded_product_reproduces_the_reference(ref, monkeypatch, workers):
     d, names = ref
+    _fft.set_workers(1)
+    one = {}
+    for name in names:
+        g, m, radii, kind = _case(d, name)
+        sp._ms_cache_clear()
+        one[name] = sp.multiscale_statistics(g, m, radii, stats=DISC, kind=kind)
     monkeypatch.setattr(sp, "_PRODUCT_MIN_THREADED", 0)          # thread every product, however small
     _fft.set_workers(workers)
     for name in names:
         g, m, radii, kind = _case(d, name)
+        sp._ms_cache_clear()
         got = sp.multiscale_statistics(g, m, radii, stats=DISC, kind=kind)
         for s in DISC:
-            np.testing.assert_array_equal(got[s], d[f"{name}/{s}"], err_msg=f"{s} on {name}, {workers} workers")
+            np.testing.assert_array_equal(got[s], one[name][s], err_msg=f"{s} on {name}, {workers} workers vs 1")
+            assert_close_to_reference(got[s], d[f"{name}/{s}"], f"{s} on {name}, {workers} workers")
 
 
 def test_public_transform_fallback_reproduces_the_reference(ref, monkeypatch):
     """Without scipy's private pocketfft binding (absent, or failing _pocketfft's probe) the public transforms
     are used -- the same values."""
     d, names = ref
-    monkeypatch.setattr(sp, "_PFFT", False)
-    sp._ms_cache_clear()                                          # nothing computed on the binding route reused
+    default = {}
     for name in names:
         g, m, radii, kind = _case(d, name)
+        sp._ms_cache_clear()
+        default[name] = sp.multiscale_statistics(g, m, radii, stats=DISC, kind=kind)
+    monkeypatch.setattr(sp, "_PFFT", False)
+    for name in names:
+        g, m, radii, kind = _case(d, name)
+        sp._ms_cache_clear()                                      # nothing computed on the binding route reused
         got = sp.multiscale_statistics(g, m, radii, stats=DISC, kind=kind)
         for s in DISC:
-            np.testing.assert_array_equal(got[s], d[f"{name}/{s}"], err_msg=f"{s} on {name}, public fallback")
+            np.testing.assert_array_equal(got[s], default[name][s], err_msg=f"{s} on {name}, public vs default")
+            assert_close_to_reference(got[s], d[f"{name}/{s}"], f"{s} on {name}, public fallback")
 
 
 def test_neighbour_sums_equal_the_plain_expression():
