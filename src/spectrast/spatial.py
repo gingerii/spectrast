@@ -3166,12 +3166,22 @@ def local_diversity(label_grid: np.ndarray, mask: np.ndarray, radius: int = 5, k
 # ---------------------------------------------------------------------------
 
 def bh_fdr(pvals: np.ndarray) -> np.ndarray:
-    """Benjamini-Hochberg FDR-adjusted q-values for a vector of p-values."""
-    p = np.asarray(pvals, float); n = p.size
-    order = np.argsort(p)
-    q = p[order] * n / np.arange(1, n + 1)
+    """Benjamini-Hochberg FDR-adjusted q-values for a vector of p-values.
+
+    A NaN p (a test that is undefined, e.g. a gene with no variance) stays NaN, and the other
+    p-values are corrected over the finite ones only, as if the NaN entries were absent. This
+    differs from :func:`spectrast.diff.bh_fdr`, which reads NaN as 1.0 and counts it; on input
+    without NaN the two agree exactly.
+    """
+    p = np.asarray(pvals, float)
+    out = np.full(p.shape, np.nan)
+    ok = ~np.isnan(p)
+    pv = p[ok]; n = pv.size
+    order = np.argsort(pv)
+    q = pv[order] * n / np.arange(1, n + 1)
     q = np.minimum.accumulate(q[::-1])[::-1]
-    out = np.empty(n); out[order] = np.clip(q, 0, 1)
+    qv = np.empty(n); qv[order] = np.clip(q, 0, 1)
+    out[ok] = qv
     return out
 
 

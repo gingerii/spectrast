@@ -289,3 +289,21 @@ def test_gr_moran_null_strata_options_are_exclusive_and_analytic_refuses_them():
     assert df2.attrs["spectrast_null_kind"] == "N1"
     assert df2.attrs["strata"]["n_strata"] == 4
     assert df2.attrs["strata"]["smoothed_at_um"] == 30.0
+
+
+# --------------------------------------------------------------------------- undefined statistics
+def test_spatial_bh_fdr_leaves_a_nan_p_undefined_and_corrects_the_rest():
+    """A NaN p (a gene whose statistic is undefined) stays NaN, and the other p are corrected over the
+    finite p only, exactly as if the NaN entries were absent. One NaN used to make every q NaN."""
+    from spectrast import diff
+    p = np.array([0.01, np.nan, 0.5, 0.02, np.nan])
+    q = sp.bh_fdr(p)
+    assert q.shape == p.shape
+    assert np.isnan(q[[1, 4]]).all()
+    np.testing.assert_array_equal(q[[0, 2, 3]], sp.bh_fdr(p[[0, 2, 3]]))
+    np.testing.assert_allclose(q[[0, 2, 3]], [0.03, 0.5, 0.03])
+    assert np.isnan(sp.bh_fdr([np.nan, np.nan])).all()
+    assert sp.bh_fdr([]).shape == (0,)
+    # without NaN it is the same correction as diff.bh_fdr, bit for bit
+    r = np.random.default_rng(0).random(50)
+    np.testing.assert_array_equal(sp.bh_fdr(r), diff.bh_fdr(r))
