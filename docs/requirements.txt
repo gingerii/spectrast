@@ -1,0 +1,9 @@
+# Read the Docs build dependencies for the Spectrast docs, pinned to the versions the docs were last
+# built and checked with. The package itself is installed by .readthedocs.yaml (pip install .[full]).
+sphinx==9.0.4
+sphinx-book-theme==1.2.0
+pydata-sphinx-theme==0.16.1
+myst-nb==1.4.0
+myst-parser==5.1.0
+sphinx-copybutton==0.5.2
+sphinx-design==0.7.0
