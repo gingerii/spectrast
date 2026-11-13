@@ -7,8 +7,10 @@ Three things are held to exact (uint64-view) equality here:
   the rows were gathered from (zeros elsewhere) to the bit. It is numpy behaviour, not ours, so it is checked
   on whatever numpy is installed;
 * `_gini_occupied` against the 2026-10-12 reference code it replaced (copied below verbatim);
-* the grouped schedule of `multiscale_statistics` against the frozen pre-refactor outputs in
-  tests/data/multiscale_reference.npz (the same fixture test_multiscale_equivalence.py uses).
+* the two schedules of `multiscale_statistics` (sharing groups, single pass) against each other, and a
+  subset of statistics against the full call. Against the frozen pre-refactor outputs in
+  tests/data/multiscale_reference.npz (the fixture test_multiscale_equivalence.py uses), computed on one
+  machine, the schedules are held to floating-point rounding (1e-12 relative) instead.
 """
 import os
 
@@ -17,6 +19,8 @@ import pytest
 
 from spectrast import _fft
 from spectrast import spatial as sp
+
+from _reference import assert_close_to_reference  # tests/_reference.py
 
 REF = os.path.join(os.path.dirname(__file__), "data", "multiscale_reference.npz")
 SINGLE = {"moran": sp.morans_i_multiscale, "geary": sp.gearys_c_multiscale,
@@ -227,7 +231,7 @@ def test_schedule_follows_the_pass_size():
 
 @pytest.mark.parametrize("limit", [0, float("inf")])
 def test_both_schedules_reproduce_the_frozen_outputs(ref, monkeypatch, limit):
-    """limit 0 forces the sharing groups in turn, inf the single pass; both must give the old code's bits."""
+    """limit 0 forces the sharing groups in turn, inf the single pass; both must give the old code's values."""
     monkeypatch.setattr(sp, "_FUSE_MAX_BYTES", limit)
     d, names = ref
     for name in names:
@@ -235,11 +239,25 @@ def test_both_schedules_reproduce_the_frozen_outputs(ref, monkeypatch, limit):
         got = sp.multiscale_statistics(g, m, radii, kind=kind)
         assert list(got) == list(sp.MULTISCALE_STATS)
         for s in sp.MULTISCALE_STATS:
-            assert _same_bits(got[s], d[f"{name}/{s}"]), (limit, name, s)
+            assert_close_to_reference(got[s], d[f"{name}/{s}"], f"limit={limit} {name} {s}")
         sub = sp.multiscale_statistics(g, m, iter(radii), stats=("losh", "geary", "moran"), kind=kind)
         assert list(sub) == ["losh", "geary", "moran"]
         for s in sub:
-            assert _same_bits(sub[s], d[f"{name}/{s}"]), (limit, name, s)
+            assert _same_bits(sub[s], got[s]), (limit, name, s)
+
+
+def test_the_two_schedules_agree_bit_for_bit(ref, monkeypatch):
+    """The sharing groups (limit 0) and the single pass (inf) give the same bits within one run."""
+    d, names = ref
+    for name in names:
+        g, m, radii, kind = _case(d, name)
+        out = {}
+        for limit in (0, float("inf")):
+            monkeypatch.setattr(sp, "_FUSE_MAX_BYTES", limit)
+            sp._ms_cache_clear()
+            out[limit] = sp.multiscale_statistics(g, m, radii, kind=kind)
+        for s in sp.MULTISCALE_STATS:
+            assert _same_bits(out[0][s], out[float("inf")][s]), (name, s)
 
 
 @pytest.mark.parametrize("limit", [0, float("inf")])

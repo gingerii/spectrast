@@ -84,16 +84,16 @@ def presence_df():
     return gr.fingerprint_presence(_presence_section())
 
 
-def test_presence_table_is_bit_identical_to_before(presence_df):
+def test_presence_table_is_unchanged(presence_df):
     df = presence_df
     for _, r in df.iterrows():
-        assert [float(r[c]) for c in _NUM] == _PRESENCE_PIN[r.axis], r.axis
+        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN[r.axis], rel=1e-12), r.axis
     assert list(df.underpowered) == [False, False, False]
     assert list(df.present) == [True, True, False]
     df2 = gr.fingerprint_presence(_presence_section(), axes=("scale_peak_moran", "focality"),
                                   n_perm=2, seed=7)
     for _, r in df2.iterrows():
-        assert [float(r[c]) for c in _NUM] == _PRESENCE_PIN2[r.axis], r.axis
+        assert [float(r[c]) for c in _NUM] == pytest.approx(_PRESENCE_PIN2[r.axis], rel=1e-12), r.axis
 
 
 def test_presence_values_are_what_the_test_ranked(presence_df):
@@ -168,7 +168,7 @@ def report():
 def test_section_report_numbers_unchanged_and_by_radius_consistent(report):
     for k, v in _QC_PIN.items():
         blk, key = k.split(".")
-        assert report[blk][key] == v, k
+        assert report[blk][key] == (pytest.approx(v, rel=1e-12) if isinstance(v, float) else v), k
     br = report["saturation"]["by_radius"]
     assert br["radius_um"] == report["provenance"]["radii_um"]
     f = np.asarray(br["frac_significant"])

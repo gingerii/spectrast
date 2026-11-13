@@ -7,6 +7,8 @@ import pytest
 
 from spectrast import diff
 
+from _reference import assert_close_to_reference  # tests/_reference.py
+
 
 def test_design_floor_unpaired_counts_the_samplers_own_support():
     d = diff.design_floor(4, 4, n_features=300)
@@ -249,17 +251,9 @@ _PRE_EXISTING_COLUMN_ORDER = [
 ]
 
 
-def test_existing_columns_are_bit_identical_on_the_toy_design():
-    """The regression guard for this branch.
-
-    The Trem2 capstone CSV cannot serve as one: `trem2_amyloid.csv` is the post-2026-08-19
-    library-default-grid run (10 hits, Ccl3 joins) while `trem2_amyloid_BASELINE_2026-07-20.csv`
-    is the pre-change hand-set-grid run (9 hits) that the analysis driver used to
-    produce before the driver adopted the library's pitch-anchored default -- 173-300 of 300
-    genes differ between the two files by design, so comparing them was never a regression guard
-    for this (or any) branch. This fixture pins the columns on a design small enough to recompute
-    in seconds instead.
-    """
+def test_existing_columns_are_unchanged_on_the_toy_design():
+    """Regression guard: the existing output columns, pinned on a design small enough to recompute in
+    seconds. Numeric columns hold to floating-point rounding on any machine; the rest exactly."""
     A, B = _toy_arms(seed=3)
     feats = [f"g{i}" for i in range(8)]
     df = diff.differential(A, B, axis="moran", features=feats, null="replicate", n_perm=50, seed=0)
@@ -271,7 +265,7 @@ def test_existing_columns_are_bit_identical_on_the_toy_design():
     for col, ref in _PINNED_TOY.items():
         got = df[col].to_numpy()
         if got.dtype.kind in "fc":
-            np.testing.assert_array_equal(got, np.asarray(ref), err_msg=col)
+            assert_close_to_reference(got, ref, col)
         else:
             assert list(got) == list(ref), col
 
