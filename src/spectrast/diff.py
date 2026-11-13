@@ -1064,7 +1064,7 @@ def differential(adatas_A, adatas_B, *, axis="moran", features=None, pairs=None,
         ``(df, curves)``; with both, ``(df, grid, curves)``. ``grid`` is a DataFrame with one row
         per feature and radius: the ``gene`` column, ``scale_um`` (the radius), ``dI``
         (the signed difference there), ``p`` (a per-radius two-sided permutation p, not corrected
-        across radii) and ``fdr`` (BH over all feature × radius rows).
+        across radii; 1 where ``dI`` is undefined) and ``fdr`` (BH over all feature × radius rows).
 
     See Also
     --------
@@ -1673,7 +1673,12 @@ def differential(adatas_A, adatas_B, *, axis="moran", features=None, pairs=None,
             envelope_alpha=float(envelope_alpha), labels=None, null=null_used, n_perm=int(n_perm))
     if not return_grid:
         return (df, curves) if return_curves else df
-    p_gr = (1 + (np.abs(null_d) >= np.abs(obs)[None]).sum(0)) / (n_perm + 1)
+    # Count over the finite null draws only; where the observed difference is undefined (a feature
+    # absent from an arm) there is nothing to test, so the radius is gated out as p = 1, as the main
+    # table gates out such a feature, rather than falling to the floor 1 / (n_perm + 1).
+    fin = np.isfinite(null_d)
+    p_gr = (1 + (fin & (np.abs(null_d) >= np.abs(obs)[None])).sum(0)) / (fin.sum(0) + 1)
+    p_gr = np.where(np.isfinite(obs), p_gr, 1.0)
     grid = pd.DataFrame([dict(**{id_col: ids[g]}, scale_um=float(radii_um[r]), dI=float(obs[r, g]),
                               p=float(p_gr[r, g])) for r in range(len(radii)) for g in range(G)])
     grid["fdr"] = bh_fdr(grid.p.values)
