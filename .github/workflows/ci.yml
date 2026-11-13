@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A new push to a pull request cancels its older run; every push to main runs to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # The CPU path only: the optional torch GPU backends are not installed, so their tests skip.
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[full]"
+          pip install pytest
+      - name: Run tests
+        run: pytest tests/ -ra
+
+  docs:
+    # The same build Read the Docs runs, but with warnings as errors. Tutorials are committed with
+    # their outputs and are rendered, not executed.
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r docs/requirements.txt
+          pip install ".[full]"
+      - name: Build HTML (warnings are errors)
+        run: sphinx-build -W --keep-going -b html docs docs/_build/html
