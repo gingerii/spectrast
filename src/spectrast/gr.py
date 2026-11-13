@@ -1835,7 +1835,8 @@ def moran_null(adata, *, genes=None, method="analytic", n_perm=199, strata_key=N
         ``r_um`` (radius in coordinate units), ``I`` (observed Moran's I), ``mu`` and ``sd`` (null
         mean and standard deviation), ``z``, and ``p``. ``p`` is one-sided (organization above the
         null): a normal tail probability for the analytic null, and
-        ``(1 + #{draws >= I}) / (n_perm + 1)`` for the permutation null.
+        ``(1 + #{draws >= I}) / (n + 1)`` over the ``n`` finite draws for the permutation null
+        (``n = n_perm`` unless a draw is undefined).
 
         ``df.attrs`` holds ``spectrast_backend``, ``spectrast_null_method``, ``spectrast_null_kind``
         (``"A0"``, ``"N0"`` or ``"N1"``), ``n_perm``, ``seed``, ``bin_um``, ``radii_bins``,

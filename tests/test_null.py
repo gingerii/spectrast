@@ -307,3 +307,97 @@ def test_spatial_bh_fdr_leaves_a_nan_p_undefined_and_corrects_the_rest():
     # without NaN it is the same correction as diff.bh_fdr, bit for bit
     r = np.random.default_rng(0).random(50)
     np.testing.assert_array_equal(sp.bh_fdr(r), diff.bh_fdr(r))
+
+
+@pytest.mark.parametrize("stat", ["moran", "geary", "general_g", "losh"])
+def test_permutation_p_is_nan_where_the_observed_statistic_is_undefined(stat):
+    """An all-zero (absent) gene has no variance, so these statistics are NaN on it. A NaN compares as
+    False with every draw, which used to give the smallest possible p, 1/(P+1): the absent gene read as
+    the most significant one. Its p is now NaN, and a gene with a defined statistic keeps its p."""
+    _, row, col, HW, mask, rng = _toy()
+    radii = [1, 2, 4]
+    absent = np.zeros(len(row))
+    r = N.permutation_null(absent, row, col, HW, mask, radii, stat=stat, n_perm=19, higher=True)
+    assert np.isnan(r["obs"]).all()
+    assert np.isnan(r["p_two"]).all() and np.isnan(r["p"]).all()
+    x = _planted(row, col, HW, rng)
+    x = x - x.min() + 0.1                                  # General G wants non-negative values
+    f = N.permutation_null(x, row, col, HW, mask, radii, stat=stat, n_perm=19, higher=True)
+    assert np.isfinite(f["null"]).all()
+    up = (1.0 + (f["null"] >= f["obs"]).sum(0)) / 20.0
+    dn = (1.0 + (f["null"] <= f["obs"]).sum(0)) / 20.0
+    np.testing.assert_array_equal(f["p"], up)
+    np.testing.assert_array_equal(f["p_two"], np.minimum(1.0, 2.0 * np.minimum(up, dn)))
+
+
+def test_moran_nulls_and_gene_inference_give_an_absent_gene_a_nan_p():
+    _, row, col, HW, mask, rng = _toy()
+    radii = [1, 2]
+    x = _planted(row, col, HW, rng)
+    absent = np.zeros(len(row))
+    r = N.moran_permutation_null(absent, row, col, HW, mask, radii, n_perm=19)
+    assert np.isnan(r["I"]).all() and np.isnan(r["p"]).all()
+    # the batch: the absent gene's rows are NaN, the other gene's rows equal its own call
+    df = N.moran_null_batch(np.column_stack([x, absent]), row, col, HW, mask, radii, n_perm=19)
+    assert np.isnan(df[df.gene == 1].p).all()
+    one = N.moran_permutation_null(x, row, col, HW, mask, radii, n_perm=19, seed=0)
+    assert np.isfinite(one["p"]).all()
+    np.testing.assert_array_equal(df[df.gene == 0].p.to_numpy(), one["p"])
+    gi = N.gene_inference(np.column_stack([x, absent]), row, col, HW, mask, radii, stat="moran",
+                          method="permutation", n_perm=19)
+    assert np.isnan(gi["p_two"][:, 1]).all() and np.isfinite(gi["p_two"][:, 0]).all()
+
+
+def test_spatial_permutation_p_and_q_are_nan_for_an_absent_gene():
+    """The same for the lattice-level permutation tests; ``permutation_test`` also feeds its p into
+    the FDR, where the absent gene used to arrive as a floor p."""
+    rng = np.random.default_rng(0)
+    from scipy.ndimage import gaussian_filter
+    H = W = 20
+    mask = np.ones((H, W), bool); mask[5:9, 5:9] = False
+    G = np.zeros((H, W, 2))
+    G[..., 1] = gaussian_filter(rng.standard_normal((H, W)), 2.0) * mask
+    obs = sp.morans_i(G, mask, radius=1)
+    assert np.isnan(obs[0]) and np.isfinite(obs[1])
+    p = sp.permutation_pvalues(G, mask, obs, radius=1, n_perm=19)
+    assert np.isnan(p[0])
+    np.testing.assert_array_equal(p[1:], sp.permutation_pvalues(G[..., 1:], mask, obs[1:], radius=1,
+                                                                n_perm=19))
+    moran = lambda g, m: sp.morans_i(g, m, radius=1)                         # noqa: E731
+    for alt in ("greater", "less", "two-sided"):
+        t = sp.permutation_test(moran, G, mask, n_perm=19, alternative=alt)
+        assert np.isnan(t["pval"][0]) and np.isnan(t["qval"][0])
+        t1 = sp.permutation_test(moran, G[..., 1:], mask, n_perm=19, alternative=alt)
+        np.testing.assert_array_equal(t["pval"][1:], t1["pval"])
+        np.testing.assert_array_equal(t["qval"][1:], t1["qval"])
+
+
+def test_permutation_test_leaves_undefined_draws_out_of_the_null():
+    """A draw whose statistic is undefined is neither above nor below the observed value. It leaves both
+    the count and the denominator: p = (1 + #finite draws as or more extreme) / (#finite draws + 1)."""
+    H = W = 6
+    mask = np.ones((H, W), bool)
+    vals = np.roll(np.arange(H * W, dtype=float), -20)          # bin (0, 0) holds 20
+    grid = np.stack([vals.reshape(H, W), np.ones((H, W))], -1)   # gene 1 is constant
+
+    def run(alternative):
+        seen = []
+
+        def stat(g, m):                    # the value in bin (0, 0), undefined when odd
+            v = g[0, 0, :].copy()
+            v[v % 2 == 1] = np.nan
+            seen.append(v[0])
+            return v
+        out = sp.permutation_test(stat, grid, mask, n_perm=60, seed=1, alternative=alternative)
+        return out, seen[0], np.array(seen[1:])
+
+    out, obs, draws = run("greater")
+    fin = np.isfinite(draws)
+    assert obs == 20.0 and 10 < fin.sum() < 50
+    n1 = fin.sum() + 1.0
+    up = (1.0 + (draws[fin] >= obs).sum()) / n1
+    dn = (1.0 + (draws[fin] <= obs).sum()) / n1
+    assert out["pval"][0] == up and out["qval"][0] == up
+    assert np.isnan(out["pval"][1]) and np.isnan(out["qval"][1])
+    assert run("less")[0]["pval"][0] == dn
+    assert run("two-sided")[0]["pval"][0] == min(1.0, 2.0 * min(up, dn))

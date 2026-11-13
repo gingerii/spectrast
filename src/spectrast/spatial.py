@@ -2749,6 +2749,25 @@ def focality(local_map: np.ndarray, mask: np.ndarray) -> dict:
 # Significance via batched permutation (same FFT machinery)
 # ---------------------------------------------------------------------------
 
+def _perm_pvalues(nulls, obs):
+    """One-sided permutation p-values ``(p_up, p_down)``, counted over the finite draws.
+
+    ``nulls`` is ``(P, ...)`` and ``obs`` has the shape of one draw. A draw that is not finite is an
+    undefined statistic, not a value above or below ``obs``, so it leaves both the count and the
+    denominator: ``p_up = (1 + #{finite draws >= obs}) / (#{finite draws} + 1)``, and ``p_down``
+    counts ``<=``. Where ``obs`` is not finite there is nothing to test and both are NaN. With every
+    draw finite this is the usual ``(1 + #{draws >= obs}) / (P + 1)``, to the bit.
+    """
+    nulls = np.asarray(nulls, float)
+    obs = np.asarray(obs, float)
+    fin = np.isfinite(nulls)
+    n1 = fin.sum(0) + 1.0
+    p_up = (1.0 + (fin & (nulls >= obs)).sum(0)) / n1
+    p_dn = (1.0 + (fin & (nulls <= obs)).sum(0)) / n1
+    undefined = ~np.isfinite(obs)
+    return np.where(undefined, np.nan, p_up), np.where(undefined, np.nan, p_dn)
+
+
 def permutation_pvalues(grid: np.ndarray, mask: np.ndarray, observed: np.ndarray,
                         kernel: np.ndarray | None = None, radius: int = 1,
                         n_perm: int = 100, seed: int = 0) -> np.ndarray:
@@ -2756,7 +2775,10 @@ def permutation_pvalues(grid: np.ndarray, mask: np.ndarray, observed: np.ndarray
 
     Each permutation reshuffles spot positions (same shuffle across genes) and
     recomputes I for all genes via one batched FFT, so n_perm permutations cost
-    n_perm batched convolutions. Returns (G,) p-values.
+    n_perm batched convolutions. Returns (G,) p-values,
+    ``(1 + #{finite draws >= observed}) / (#{finite draws} + 1)``. A gene whose
+    observed I is not finite (e.g. an all-zero gene) gets NaN, and a draw whose I
+    is undefined is left out of the null.
     """
     if kernel is None:
         kernel = neighbor_kernel(radius)
@@ -2769,7 +2791,9 @@ def permutation_pvalues(grid: np.ndarray, mask: np.ndarray, observed: np.ndarray
     inv = np.where(W1 > 0, 1.0 / np.maximum(W1, 1e-12), 0.0)[..., None]
     zbar = vals.mean(0)                                     # value mean and Σz² are invariant (same value set)
     den = np.where((d := ((vals - zbar) ** 2).sum(0)) == 0, np.nan, d)
+    observed = np.asarray(observed, float)
     ge = np.ones(grid.shape[-1])           # count >= observed (start at 1 for +obs)
+    n1 = np.ones(grid.shape[-1])           # finite draws, +1 for obs
     perms = [rng.permutation(len(vals)) for _ in range(n_perm)]   # pre-draw (identical to serial)
 
     def _one(pm):
@@ -2777,12 +2801,14 @@ def permutation_pvalues(grid: np.ndarray, mask: np.ndarray, observed: np.ndarray
         buf[idx[:, 0], idx[:, 1]] = vals[pm]
         z = (buf - zbar) * m[..., None]                    # only the numerator FFT per permutation
         Ip = (z * (_fftconv_same(z, kernel) * inv)).sum((0, 1)) / den   # row-standardized Moran (matches morans_i)
-        return (Ip >= observed).astype(float)
+        fin = np.isfinite(Ip)
+        return (fin & (Ip >= observed)).astype(float), fin.astype(float)
 
     from ._parallel import parallel_map
-    for hit in parallel_map(_one, perms):                  # FFT-bound null, threaded
-        ge += hit
-    return ge / (n_perm + 1)
+    for hit, fin in parallel_map(_one, perms):             # FFT-bound null, threaded
+        ge += hit; n1 += fin
+    # a NaN observed I compares False with every draw, which would give it the floor p
+    return np.where(np.isfinite(observed), ge / n1, np.nan)
 
 
 # ---------------------------------------------------------------------------
@@ -3194,14 +3220,18 @@ def permutation_test(stat_fn, grid: np.ndarray, mask: np.ndarray, n_perm: int = 
     genes) and recomputes the whole gene vector via the statistic's own batched FFT, so n_perm
     permutations cost n_perm batched transforms. Destroys spatial structure while preserving each
     gene's marginal distribution. Returns dict(observed, pval, qval, z).
+
+    ``pval`` is ``(1 + #{finite draws as or more extreme}) / (#{finite draws} + 1)``; the two-sided
+    value is twice the smaller tail, capped at 1. A gene whose observed statistic is not finite
+    (e.g. Moran's I of an all-zero gene) gets NaN ``pval`` and ``qval``, a draw whose statistic is
+    undefined is left out of the null, and ``qval`` corrects over the finite p only
+    (:func:`bh_fdr`).
     """
     if grid.ndim == 2:
         grid = grid[..., None]
     obs = np.asarray(stat_fn(grid, mask))
     idx = np.argwhere(mask); vals = grid[mask]                # (n_occ, G)
     rng = np.random.default_rng(seed)
-    G = grid.shape[-1]
-    ge = np.ones(G); le = np.ones(G)
     perms = [rng.permutation(len(vals)) for _ in range(n_perm)]   # pre-draw (identical to serial)
 
     def _one(pm):
@@ -3211,14 +3241,13 @@ def permutation_test(stat_fn, grid: np.ndarray, mask: np.ndarray, n_perm: int = 
 
     from ._parallel import parallel_map
     nulls = np.array(parallel_map(_one, perms))                   # FFT-bound null, threaded
-    for i in range(n_perm):
-        ge += nulls[i] >= obs; le += nulls[i] <= obs
+    p_up, p_dn = _perm_pvalues(nulls, obs)
     if alternative == "greater":
-        p = ge / (n_perm + 1)
+        p = p_up
     elif alternative == "less":
-        p = le / (n_perm + 1)
+        p = p_dn
     else:
-        p = np.minimum(1.0, 2 * np.minimum(ge, le) / (n_perm + 1))
+        p = np.minimum(1.0, 2 * np.minimum(p_up, p_dn))
     z = (obs - nulls.mean(0)) / (nulls.std(0) + 1e-12)
     return dict(observed=obs, pval=p, qval=bh_fdr(p), z=z)
 

@@ -175,7 +175,10 @@ def permutation_null(values, row, col, HW, mask, radii, *, stat="moran", n_perm=
           ``(R,)``.
         - ``z`` : ``(obs - mu) / sd``, signed, ``(R,)``.
         - ``p_two`` : two-sided permutation p-value ``min(1, 2 * min(p_up, p_down))``, ``(R,)``,
-          where ``p_up = (1 + #(null >= obs)) / (P + 1)`` and ``p_down`` counts ``null <= obs``.
+          where ``p_up = (1 + #(null >= obs)) / (n + 1)`` and ``p_down`` counts ``null <= obs``,
+          over the ``n`` finite null values at that radius (``n = P`` unless a draw is undefined).
+          NaN where ``obs`` is not finite, e.g. Moran's I of an all-zero gene: an undefined
+          statistic has no p-value.
         - ``higher`` : as given.
         - ``p`` : the one-sided p-value in the ``higher`` direction (``p_up`` or ``p_down``),
           ``(R,)``; only when ``higher`` is not ``None``.
@@ -192,8 +195,8 @@ def permutation_null(values, row, col, HW, mask, radii, *, stat="moran", n_perm=
     mu = nul.mean(0)
     sd = nul.std(0, ddof=1) + 1e-300
     z = (obs - mu) / sd
-    p_up = (1.0 + (nul >= obs[None, :]).sum(0)) / (n_perm + 1.0)
-    p_dn = (1.0 + (nul <= obs[None, :]).sum(0)) / (n_perm + 1.0)
+    # over the finite draws; NaN where obs is undefined (a NaN would otherwise get the floor p)
+    p_up, p_dn = sp._perm_pvalues(nul, obs)
     p_two = np.minimum(1.0, 2.0 * np.minimum(p_up, p_dn))
     out = dict(stat=stat, obs=obs, mu=mu, sd=sd, z=z, p_two=p_two, higher=higher)
     if higher is not None:
@@ -235,7 +238,9 @@ def moran_permutation_null(values, row, col, HW, mask, radii, *, n_perm=200, str
     dict
         - ``I`` : the observed Moran curve, ``(R,)``.
         - ``mu``, ``sd`` : mean and standard deviation (``ddof=1``) of the null, ``(R,)``.
-        - ``p`` : one-sided upper permutation p-value ``(1 + #(null >= I)) / (P + 1)``, ``(R,)``.
+        - ``p`` : one-sided upper permutation p-value ``(1 + #(null >= I)) / (n + 1)``, ``(R,)``,
+          over the ``n`` finite null values at that radius (``n = P`` unless a draw is undefined);
+          NaN where ``I`` is not finite, e.g. for an all-zero gene.
         - ``z`` : ``(I - mu) / sd``, ``(R,)``.
         - ``null`` : the permuted curves, ``(P, R)``; omitted when ``keep_null=False``.
     """
@@ -248,7 +253,7 @@ def moran_permutation_null(values, row, col, HW, mask, radii, *, n_perm=200, str
     nul = A[:, 1:].T                                                                # (P, R)
     mu = nul.mean(0)
     sd = nul.std(0, ddof=1) + 1e-300
-    p = (1.0 + (nul >= I[None, :]).sum(0)) / (n_perm + 1.0)
+    p = sp._perm_pvalues(nul, I)[0]
     z = (I - mu) / sd
     out = dict(I=I, mu=mu, sd=sd, p=p, z=z)
     if keep_null:
